@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Build output (build.sh writes the .app and Xcode derived data here)
+build/
+DerivedData/
+
+# Rust build artifacts
+rust/target/
+
+# Screenshots produced by --screenshot
+shots/
+
+# Xcode per-user state
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Packages/
+
+# Editors
+.vscode/
+.idea/

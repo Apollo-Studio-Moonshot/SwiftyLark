@@ -1,0 +1,14 @@
+{
+  "name": "swifty-lark",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Swifty Lark — a native macOS Feishu/Lark client: Rust core + SwiftUI interface, no Electron.",
+  "scripts": {
+    "build": "./build.sh",
+    "start": "open \"build/Swifty Lark.app\"",
+    "screenshot": "\"build/Swifty Lark.app/Contents/MacOS/Swifty Lark\" --screenshot shots/now.png",
+    "core:stats": "./rust/target/release/swiftylark-core --stats"
+  },
+  "keywords": ["macos", "swiftui", "rust", "lark", "feishu", "native"],
+  "license": "MIT"
+}

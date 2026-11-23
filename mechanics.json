@@ -1,0 +1,211 @@
+{
+  "version": 1,
+  "values": [
+    {
+      "name": "primary accent",
+      "group": "appearance",
+      "value": "#3370ff",
+      "source": "main-window.asar css (6 uses of #3370ff)"
+    },
+    {
+      "name": "dark content background",
+      "group": "appearance",
+      "value": "#121212",
+      "source": "main-window.asar css/ce657887.css --bg-content-base (dark)"
+    },
+    {
+      "name": "dark panel background",
+      "group": "appearance",
+      "value": "#1a1a1a",
+      "source": "main-window.asar css --N50 (dark)"
+    },
+    {
+      "name": "dark primary text",
+      "group": "appearance",
+      "value": "#ebebeb",
+      "source": "main-window.asar css --N900 (dark)"
+    },
+    {
+      "name": "dark secondary text",
+      "group": "appearance",
+      "value": "#a6a6a6",
+      "source": "main-window.asar css --N600 (dark)"
+    },
+    {
+      "name": "light primary text",
+      "group": "appearance",
+      "value": "#1f2329",
+      "source": "main-window.asar css --N900 (light)"
+    },
+    {
+      "name": "light divider",
+      "group": "appearance",
+      "value": "#dee0e3",
+      "source": "main-window.asar css --N300 (light)"
+    },
+    {
+      "name": "selected row background (light)",
+      "group": "appearance",
+      "value": "#f0f4ff",
+      "source": "main-window.asar css background-color:#f0f4ff"
+    },
+    {
+      "name": "unread badge",
+      "group": "appearance",
+      "value": "#fa1f41",
+      "source": "main-window.asar css (4 uses of #fa1f41)"
+    },
+    {
+      "name": "conversation list width",
+      "group": "layout",
+      "value": 320,
+      "unit": "px",
+      "source": "messenger.asar css width:320px (46 uses)"
+    },
+    {
+      "name": "corner radius",
+      "group": "layout",
+      "value": 8,
+      "unit": "px",
+      "source": "messenger.asar css border-radius:8px (623 uses)"
+    },
+    {
+      "name": "message text size",
+      "group": "layout",
+      "value": 14,
+      "unit": "px",
+      "source": "messenger.asar css font-size:14px (1112 uses)"
+    },
+    {
+      "name": "default window width",
+      "group": "layout",
+      "value": 1200,
+      "unit": "px",
+      "source": "main-window.asar js width: 1200"
+    },
+    {
+      "name": "default window height",
+      "group": "layout",
+      "value": 800,
+      "unit": "px",
+      "estimated": true
+    },
+    {
+      "name": "composer editor height",
+      "group": "layout",
+      "value": 3,
+      "unit": "lines",
+      "source": "setting.asar common/701c8997c4.js uiSetting.editorHeight \"3\""
+    },
+    {
+      "name": "chat filters",
+      "group": "behaviour",
+      "value": "All / Unread / Groups (feedFilterType ALL, UNREAD, TEAM)",
+      "source": "messenger.asar app-chat~1/b86792886a.js feedFilterType:\"TEAM\"; feed filter shortcut in Lark Framework 0x4523ea0"
+    },
+    {
+      "name": "send key",
+      "group": "behaviour",
+      "value": "Return sends; Shift/Option+Return adds a line; Cmd+Return always sends; alternate setting Cmd+Enter",
+      "source": "setting.asar defaults shortcut.send \"Enter\" + ShortcutSettingModal 510bc4a0e4.js (Kt \"Enter\", Dt Command+Enter) + messenger.asar common/c7d390d4c5.js sendMessageKeyDown"
+    },
+    {
+      "name": "message grouping",
+      "group": "behaviour",
+      "value": "consecutive messages by one sender share one avatar",
+      "estimated": true
+    },
+    {
+      "name": "unread reset",
+      "group": "behaviour",
+      "value": "opening a conversation marks it read",
+      "estimated": true
+    },
+    {
+      "name": "dock unread badge",
+      "group": "behaviour",
+      "value": "count shown; badgeStyle 1 (WEAK_REMIND)",
+      "source": "setting.asar defaults notifySetting.showUnreadNumber true, badgeStyle 1"
+    },
+    {
+      "name": "notification sound default",
+      "group": "behaviour",
+      "value": true,
+      "source": "setting.asar defaults notifySetting.notifySound true (preference default only; no sound is played yet)"
+    },
+    {
+      "name": "search shortcut",
+      "group": "controls",
+      "value": "Cmd+K (openQuickSearch) and Cmd+F (openSecondQuickSearch)",
+      "source": "setting.asar defaults shortcut.openQuickSearch Command+K, openSecondQuickSearch Command+F"
+    },
+    {
+      "name": "settings shortcut",
+      "group": "controls",
+      "value": "Cmd+,",
+      "source": "setting.asar ShortcutSettingModal 510bc4a0e4.js label map Command+,"
+    },
+    {
+      "name": "tab shortcut",
+      "group": "controls",
+      "value": "Cmd+1..5",
+      "estimated": true
+    },
+    {
+      "name": "native launcher entry",
+      "group": "native",
+      "value": "0x100008c68 _main",
+      "source": "Feishu Mach-O; dlopen of LarkMain, 42-line pseudo-code"
+    },
+    {
+      "name": "native app entry",
+      "group": "native",
+      "value": "0x42a5a60 _LarkMain",
+      "source": "Lark Framework export; 266-line pseudo-code"
+    },
+    {
+      "name": "native shortcut registry",
+      "group": "native",
+      "value": "0x4523ea0",
+      "source": "Lark Framework; references lark.shortcut.im_next_feed_filter, im_next_unread_chat, im_open_chat_in"
+    },
+    {
+      "name": "native theme preference reader",
+      "group": "native",
+      "value": "0x3eae5a4",
+      "source": "Lark Framework; lark.setting.theme, content_theme, skin"
+    },
+    {
+      "name": "native url-open preference",
+      "group": "native",
+      "value": "0x4575fdc",
+      "source": "Lark Framework; lark.setting.url_default_open_method"
+    },
+    {
+      "name": "native font workaround pref",
+      "group": "native",
+      "value": "com.electron.lark.font_workaround",
+      "source": "Feishu 0x1000201c0"
+    },
+    {
+      "name": "core process memory",
+      "group": "performance",
+      "value": 2.4,
+      "unit": "MB",
+      "source": "swiftylark-core --stats (measured, this build)"
+    },
+    {
+      "name": "electron client memory",
+      "group": "performance",
+      "value": 600,
+      "unit": "MB",
+      "estimated": true
+    },
+    {
+      "name": "core threads",
+      "group": "performance",
+      "value": 2,
+      "source": "swiftylark-core --stats (measured)"
+    }
+  ]
+}
