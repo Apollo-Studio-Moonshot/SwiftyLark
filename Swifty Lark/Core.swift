@@ -134,6 +134,8 @@ struct CoreStats: Codable, Hashable {
 struct StatePayload: Codable {
     var user: LarkUser
     var workspace: LarkWorkspace
+    var imported: Bool?
+    var source: String?
     var chats: [LarkChat]
     var contacts: [LarkContact]
     var docs: [LarkDoc]
@@ -311,6 +313,13 @@ final class CoreClient {
         return decode(CoreStats.self, from: resp["data"] ?? [:])
     }
 
+    /// Replaces the core's workspace with real data scraped from Feishu's web
+    /// client. Returns the import summary (chat/message counts) on success.
+    func importWorkspace(_ payload: [String: Any]) -> [String: Any]? {
+        guard let resp = call("import", payload), (resp["ok"] as? Bool) == true else { return nil }
+        return resp["data"] as? [String: Any]
+    }
+
     private func decode<T: Decodable>(_ type: T.Type, from any: Any) -> T? {
         guard JSONSerialization.isValidJSONObject(any),
               let data = try? JSONSerialization.data(withJSONObject: any) else { return nil }
@@ -379,6 +388,16 @@ final class AppModel: ObservableObject {
     @Published var showSettings = false
     @Published var loading = true
     @Published var toast: String?
+    /// True once the core holds a workspace imported from the real Feishu web
+    /// client. Until then the app shows the import screen instead of demo data.
+    @Published var imported = false
+    @Published var syncStatus = ""
+    @Published var syncChats = 0
+    @Published var syncMessages = 0
+    /// Ask the sign-in screen to open Feishu's login page (launch and expired
+    /// sessions), so the user lands in their real account without hunting for a
+    /// button.
+    @Published var loginRequested = false
     /// Set once Feishu's own login page has completed inside the app (MeloX-style
     /// cookie login). The flag is kept so the persisted Feishu session is reused
     /// on the next launch instead of asking to log in again.
@@ -410,6 +429,26 @@ final class AppModel: ObservableObject {
         // No default workspace: nothing is read from the core until the user
         // has signed in, so the app opens on the sign-in screen instead.
         if signedIn { load() }
+        // On launch (and after a Feishu session expires) open the login page
+        // right away, so signing in is the first thing the app does.
+        if !signedIn && !args.contains(where: { $0.hasPrefix("--screenshot") }) && !args.contains("--selftest") {
+            loginRequested = true
+        }
+        NotificationCenter.default.addObserver(forName: .feishuDidImport, object: nil, queue: .main) { [weak self] note in
+            Task { @MainActor in
+                guard let self else { return }
+                if let c = note.userInfo?["chats"] as? Int { self.syncChats = c }
+                if let m = note.userInfo?["messages"] as? Int { self.syncMessages = m }
+                self.load()
+            }
+        }
+        NotificationCenter.default.addObserver(forName: .feishuSyncStatus, object: nil, queue: .main) { [weak self] note in
+            Task { @MainActor in self?.syncStatus = note.userInfo?["text"] as? String ?? "" }
+        }
+        NotificationCenter.default.addObserver(forName: .feishuSessionExpired, object: nil, queue: .main) { [weak self] _ in
+            print("SWIFTYLARK: session expired notification received")
+            Task { @MainActor in self?.handleSessionExpired() }
+        }
         // keep the list times fresh and pick up core-side changes
         let t = DispatchSource.makeTimerSource(queue: .main)
         t.schedule(deadline: .now() + 30, repeating: 30)
@@ -476,9 +515,31 @@ final class AppModel: ObservableObject {
         load()
     }
 
+    /// The persisted Feishu session was rejected (the web client redirected to
+    /// accounts.feishu.cn). Drop it and ask for a fresh sign-in in-app.
+    func handleSessionExpired() {
+        guard signedIn else { return }
+        UserDefaults.standard.set(false, forKey: AppModel.signedInKey)
+        signedIn = false
+        imported = false
+        chats = []
+        syncStatus = ""
+        // A cached Feishu cookie can load the tenant for a few seconds before
+        // bouncing to the refresh page again. Remove the stale web data so the
+        // login sheet shows Feishu's real login form instead of looping.
+        FeishuSession.resetWebData { [weak self] in
+            DispatchQueue.main.async {
+                self?.loginRequested = true
+            }
+        }
+    }
+
+    var hasImportedWorkspace: Bool { imported && !chats.isEmpty }
+
     private func apply(_ p: StatePayload, keepSelection: Bool = false) {
         user = p.user
         workspace = p.workspace
+        imported = p.imported ?? false
         chats = p.chats
         contacts = p.contacts
         docs = p.docs
@@ -607,4 +668,11 @@ final class AppModel: ObservableObject {
         guard let id else { return nil }
         return contacts.first { $0.id == id }
     }
+}
+
+extension Notification.Name {
+    static let feishuDidImport = Notification.Name("swiftylark.feishu.imported")
+    static let feishuSyncStatus = Notification.Name("swiftylark.feishu.syncStatus")
+    static let feishuSessionExpired = Notification.Name("swiftylark.feishu.sessionExpired")
+    static let feishuProfileUpdated = Notification.Name("swiftylark.feishu.profile")
 }

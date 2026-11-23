@@ -86,8 +86,9 @@ tests in this workspace).
 The app opens on a sign-in screen. "Sign in with Feishu" shows Feishu's own login
 page inside the app (a `WKWebView`, the same pattern MeloX uses); once Feishu
 moves the web view to your tenant messenger, the session is kept and the app
-enters the workspace.
+opens your real Feishu workspace in an embedded web view.
 
-Not in this version: importing Feishu data into the native screens (the
-workspace content stays local after sign-in), network sync, meetings, mail,
-wiki, moments and the AI assistant. See `MECHANICS.md`.
+After sign-in the window shows the real Feishu web client, so the native sample
+screens from the clone are no longer used. Not in this version: a native Feishu
+data layer, network sync, meetings, mail, wiki, moments and the AI assistant.
+See `MECHANICS.md`.

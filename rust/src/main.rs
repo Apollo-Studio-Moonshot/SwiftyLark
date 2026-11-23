@@ -12,7 +12,7 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 fn now_secs() -> f64 {
     SystemTime::now()
@@ -168,6 +168,11 @@ pub struct Workspace {
 #[serde(rename_all = "camelCase")]
 pub struct Store {
     pub schema: u32,
+    /// True once the workspace has been replaced by real data imported from the
+    /// signed-in Feishu web client. The SwiftUI app only shows the native
+    /// workspace when this is set, so the seeded demo never masquerades as real.
+    #[serde(default)]
+    pub imported: bool,
     pub user: User,
     pub workspace: Workspace,
     pub chats: Vec<Chat>,
@@ -802,6 +807,7 @@ fn seed() -> Store {
 
     Store {
         schema: SCHEMA_VERSION,
+        imported: false,
         user: User {
             id: will.1.into(),
             name: will.0.into(),
@@ -893,8 +899,8 @@ fn chat_json(c: &Chat) -> Value {
             json!(c
                 .messages
                 .last()
-                .map(|m| if m.system {
-                    m.text.clone()
+                .map(|m| if !m.system && !m.sender.is_empty() && c.kind != "direct" {
+                    format!("{}: {}", m.sender, m.text)
                 } else {
                     m.text.clone()
                 })
@@ -920,6 +926,8 @@ fn state_payload(s: &Store) -> Value {
     json!({
         "user": s.user,
         "workspace": s.workspace,
+        "imported": s.imported,
+        "source": if s.imported { "feishu-web" } else { "demo" },
         "chats": sorted_chats(s).iter().map(|c| chat_json(c)).collect::<Vec<_>>(),
         "contacts": s.contacts,
         "docs": s.docs.iter().map(|d| {
@@ -1055,6 +1063,189 @@ fn do_add_task(s: &mut Store, p: &Value) -> Result<Value, String> {
     Ok(json!({ "task": task }))
 }
 
+fn stable_hash(text: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+fn initials(name: &str) -> String {
+    let take: String = name.trim().chars().take(2).collect();
+    if take.chars().all(|c| c.is_ascii_alphabetic()) {
+        take.to_uppercase()
+    } else {
+        take
+    }
+}
+
+/// Sidebar previews arrive as "Sender: text" (sometimes with a full-width
+/// colon). Split the sender back out so the imported message has one.
+fn split_preview(text: &str) -> (String, String) {
+    for sep in [": ", "："] {
+        if let Some(pos) = text.find(sep) {
+            if pos > 0 && pos < 60 {
+                let sender = text[..pos].trim();
+                if !sender.is_empty() {
+                    return (sender.to_string(), text[pos + sep.len()..].trim().to_string());
+                }
+            }
+        }
+    }
+    (String::new(), text.trim().to_string())
+}
+
+/// Replaces the workspace with data scraped from the signed-in Feishu web
+/// client. Chats are keyed by a stable hash of their name, so repeated imports
+/// update the same rows instead of duplicating them.
+fn do_import(s: &mut Store, p: &Value) -> Result<Value, String> {
+    if let Some(u) = p.get("user").and_then(|v| v.as_object()) {
+        if let Some(v) = u.get("id").and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                s.user.id = v.into();
+            }
+        }
+        if let Some(v) = u.get("name").and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                s.user.name = v.into();
+            }
+        }
+        if let Some(v) = u.get("title").and_then(|v| v.as_str()) {
+            s.user.title = v.into();
+        }
+        if let Some(v) = u.get("email").and_then(|v| v.as_str()) {
+            s.user.email = v.into();
+        }
+        if let Some(v) = u.get("avatarText").and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                s.user.avatar_text = v.into();
+            }
+        }
+    }
+    if let Some(w) = p.get("workspace").and_then(|v| v.as_object()) {
+        if let Some(v) = w.get("name").and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                s.workspace.name = v.into();
+            }
+        }
+        if let Some(v) = w.get("plan").and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                s.workspace.plan = v.into();
+            }
+        }
+        if let Some(v) = w.get("members").and_then(|v| v.as_u64()) {
+            s.workspace.members = v as u32;
+        }
+    }
+    if let Some(list) = p.get("chats").and_then(|v| v.as_array()) {
+        let ts_now = now_secs();
+        let mut chats: Vec<Chat> = Vec::new();
+        for c in list {
+            let name = c
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let hash = stable_hash(&name);
+            let mut messages: Vec<Message> = Vec::new();
+            if let Some(ms) = c.get("messages").and_then(|v| v.as_array()) {
+                for (mi, m) in ms.iter().enumerate() {
+                    let text = m
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let ts = m.get("ts").and_then(|v| v.as_f64()).unwrap_or(ts_now);
+                    messages.push(Message {
+                        id: format!("{}-{}-{}", hash, mi, (ts * 1000.0) as i64),
+                        sender: m
+                            .get("sender")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        sender_id: String::new(),
+                        text,
+                        ts,
+                        mine: m.get("mine").and_then(|v| v.as_bool()).unwrap_or(false),
+                        system: m.get("system").and_then(|v| v.as_bool()).unwrap_or(false),
+                        reactions: Vec::new(),
+                        attachment: None,
+                        edited: false,
+                    });
+                }
+            }
+            if messages.is_empty() {
+                let preview = c
+                    .get("preview")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if !preview.is_empty() {
+                    let (sender, text) = split_preview(&preview);
+                    let ts = c.get("time").and_then(|v| v.as_f64()).unwrap_or(ts_now);
+                    messages.push(msg(
+                        &format!("{}-p", hash),
+                        &sender,
+                        "",
+                        &text,
+                        ts,
+                        c.get("mine").and_then(|v| v.as_bool()).unwrap_or(false),
+                    ));
+                }
+            }
+            messages.sort_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal));
+            let mut members = vec![s.user.name.clone()];
+            members.retain(|m| !m.is_empty());
+            chats.push(Chat {
+                id: format!("c-{:x}", hash),
+                avatar_text: initials(&name),
+                hue: (hash % 360) as i32,
+                kind: c
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("group")
+                    .to_string(),
+                members,
+                unread: c
+                    .get("unread")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+                    .max(0) as i32,
+                muted: c.get("muted").and_then(|v| v.as_bool()).unwrap_or(false),
+                pinned: c.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false),
+                typing: false,
+                topic: String::new(),
+                name,
+                messages,
+            });
+        }
+        if !chats.is_empty() {
+            s.chats = chats;
+            s.imported = true;
+        }
+    }
+    save(s);
+    let messages: usize = s.chats.iter().map(|c| c.messages.len()).sum();
+    Ok(json!({
+        "imported": s.imported,
+        "chats": s.chats.len(),
+        "messages": messages,
+        "workspace": s.workspace.name,
+        "user": s.user.name,
+    }))
+}
+
 fn do_prefs(s: &mut Store, p: &Value) -> Result<Value, String> {
     if let Some(theme) = p.get("theme").and_then(|v| v.as_str()) {
         if ["dark", "light", "system"].contains(&theme) {
@@ -1184,6 +1375,7 @@ fn handle(s: &mut Store, cmd: &str, p: &Value) -> Result<Value, String> {
         "react" => do_react(s, p),
         "toggle_task" => do_toggle_task(s, p),
         "add_task" => do_add_task(s, p),
+        "import" => do_import(s, p),
         "set_prefs" => do_prefs(s, p),
         "search" => do_search(s, p),
         "stats" => Ok(do_stats(s)),
