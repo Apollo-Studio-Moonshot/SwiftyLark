@@ -449,6 +449,13 @@ final class AppModel: ObservableObject {
             print("SWIFTYLARK: session expired notification received")
             Task { @MainActor in self?.handleSessionExpired() }
         }
+        // The shared web view reached the tenant messenger with a real session.
+        NotificationCenter.default.addObserver(forName: .feishuBrowserSignedIn, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.signedIn else { return }
+                self.completeSignIn()
+            }
+        }
         // keep the list times fresh and pick up core-side changes
         let t = DispatchSource.makeTimerSource(queue: .main)
         t.schedule(deadline: .now() + 30, repeating: 30)
@@ -510,28 +517,31 @@ final class AppModel: ObservableObject {
 
     /// Feishu's login page reached the tenant messenger inside the login sheet.
     func completeSignIn() {
+        if CommandLine.arguments.contains("--capture") {
+            FeishuCapture.append(["url": "SYNC-LOG completeSignIn", "body": ""])
+        }
         UserDefaults.standard.set(true, forKey: AppModel.signedInKey)
         signedIn = true
         load()
     }
 
     /// The persisted Feishu session was rejected (the web client redirected to
-    /// accounts.feishu.cn). Drop it and ask for a fresh sign-in in-app.
+    /// accounts.feishu.cn). Keep the shared web view's cookies — its refresh
+    /// page may still be able to renew them — and show Feishu's login page in
+    /// the same web view so the user can re-authenticate.
     func handleSessionExpired() {
+        if CommandLine.arguments.contains("--capture") {
+            FeishuCapture.append(["url": "SYNC-LOG handleSessionExpired", "body": ""])
+        }
         guard signedIn else { return }
         UserDefaults.standard.set(false, forKey: AppModel.signedInKey)
         signedIn = false
         imported = false
         chats = []
         syncStatus = ""
-        // A cached Feishu cookie can load the tenant for a few seconds before
-        // bouncing to the refresh page again. Remove the stale web data so the
-        // login sheet shows Feishu's real login form instead of looping.
-        FeishuSession.resetWebData { [weak self] in
-            DispatchQueue.main.async {
-                self?.loginRequested = true
-            }
-        }
+        FeishuSession.clear()
+        FeishuWebHost.beginLogin()
+        loginRequested = true
     }
 
     var hasImportedWorkspace: Bool { imported && !chats.isEmpty }
@@ -675,4 +685,5 @@ extension Notification.Name {
     static let feishuSyncStatus = Notification.Name("swiftylark.feishu.syncStatus")
     static let feishuSessionExpired = Notification.Name("swiftylark.feishu.sessionExpired")
     static let feishuProfileUpdated = Notification.Name("swiftylark.feishu.profile")
+    static let feishuBrowserSignedIn = Notification.Name("swiftylark.feishu.browserSignedIn")
 }

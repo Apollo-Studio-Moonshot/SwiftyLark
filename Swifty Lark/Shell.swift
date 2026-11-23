@@ -57,7 +57,7 @@ struct RootView: View {
                     // zero opacity so the user only ever sees native UI.
                     FeishuSyncView()
                         .frame(width: 1200, height: 800)
-                        .opacity(0)
+                        .opacity(0.01)
                         .allowsHitTesting(false)
                 }
             } else {
@@ -170,11 +170,16 @@ struct SignInView: View {
                 .environmentObject(model)
                 .environment(\.palette, p)
         }
-        .onAppear {
-            if model.loginRequested {
-                model.loginRequested = false
-                showLogin = true
-            }
+        .onAppear { presentLoginIfRequested() }
+        // The session can expire after this view appears, so watch for a late
+        // request as well as the one present at launch.
+        .onChange(of: model.loginRequested) { _ in presentLoginIfRequested() }
+    }
+
+    private func presentLoginIfRequested() {
+        if model.loginRequested {
+            model.loginRequested = false
+            showLogin = true
         }
     }
 
@@ -258,7 +263,6 @@ struct FeishuLoginSheet: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.palette) private var p
     @Environment(\.dismiss) private var dismiss
-    @State private var loading = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -280,125 +284,218 @@ struct FeishuLoginSheet: View {
                 Spacer()
                 ProgressView()
                     .controlSize(.small)
-                    .opacity(loading ? 1 : 0)
                     .frame(width: 56, alignment: .trailing)
             }
             .padding(.horizontal, 16)
             .frame(height: 54)
             Rectangle().fill(p.borderSoft).frame(height: 1)
-            FeishuLoginWebView(isLoading: $loading) {
-                model.completeSignIn()
-                dismiss()
-            }
+            FeishuLoginWebView()
         }
         .frame(width: 880, height: 680)
         .background(p.content)
+        // Feishu's own page landed in the tenant messenger: leave the web view
+        // in place (the sync view re-attaches the same instance) and show the
+        // native workspace.
+        .onChange(of: model.signedIn) { signedIn in
+            if signedIn { dismiss() }
+        }
     }
 }
 
 struct FeishuLoginWebView: NSViewRepresentable {
-    @Binding var isLoading: Bool
-    var onSignedIn: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(isLoading: $isLoading, onSignedIn: onSignedIn)
+    func makeNSView(context: Context) -> WKWebView {
+        FeishuWebHost.start()
+        let webView = FeishuWebHost.webView
+        // The same instance is re-attached after a sign-out/sign-in cycle.
+        if webView.superview != nil { webView.removeFromSuperview() }
+        return webView
     }
 
-    func makeNSView(context: Context) -> WKWebView {
+    func updateNSView(_ nsView: WKWebView, context: Context) {}
+}
+
+/// The one Feishu web client in the app: the sign-in sheet shows it, and after
+/// login the same instance is re-attached offscreen to keep feeding the Rust
+/// core. Reusing it matters because Feishu keeps part of its session in
+/// per-web-view state; a fresh WKWebView loading the tenant URL gets bounced to
+/// the session-refresh page.
+enum FeishuWebHost {
+    static let webView: WKWebView = {
         let configuration = WKWebViewConfiguration()
         // The default store keeps Feishu's cookies, so the session survives quits.
         configuration.websiteDataStore = .default()
-        // Read the signed-in account and tenant from Feishu's own user endpoint
-        // while the login flow runs, so the native workspace can greet the real
-        // person instead of a placeholder.
         let controller = WKUserContentController()
+        controller.add(FeishuSync.shared, name: FeishuSync.handler)
         controller.add(FeishuProfile.shared, name: FeishuProfile.handler)
         controller.addUserScript(WKUserScript(
             source: FeishuProfile.script,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         ))
+        controller.addUserScript(WKUserScript(
+            source: FeishuSync.script,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: false
+        ))
+        if CommandLine.arguments.contains("--capture") {
+            controller.add(FeishuCapture.shared, name: "feishuCapture")
+            controller.addUserScript(WKUserScript(
+                source: FeishuCapture.script,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false
+            ))
+        }
         // Feishu's login flow switches routes without a full page load, so the
         // navigation delegate alone can miss the moment the tenant appears.
-        controller.add(context.coordinator, name: "feishuLoginState")
+        controller.add(auth, name: "feishuLoginState")
         controller.addUserScript(WKUserScript(
             source: "setInterval(function(){try{window.webkit.messageHandlers.feishuLoginState.postMessage(location.href);}catch(e){}},1000);",
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
         configuration.userContentController = controller
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = WKWebView(
+            frame: NSRect(x: 0, y: 0, width: 1200, height: 800),
+            configuration: configuration
+        )
         webView.customUserAgent = FeishuSignIn.browserUserAgent
-        webView.navigationDelegate = context.coordinator
-        webView.load(URLRequest(url: FeishuSignIn.loginURL))
+        webView.navigationDelegate = auth
         return webView
+    }()
+
+    private static let auth = FeishuAuth {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .feishuBrowserSignedIn, object: nil)
+        }
     }
 
-    func updateNSView(_ nsView: WKWebView, context: Context) {}
+    private static var started = false
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
-        private let isLoading: Binding<Bool>
-        private let onSignedIn: () -> Void
-        private var finished = false
-        private var pendingConfirm: DispatchWorkItem?
-        private var latestURL: URL?
-        /// True once Feishu's own login form has been shown. Completing sign-in
-        /// only after this prevents a cached, half-expired tenant page from
-        /// counting as a successful login.
-        private var sawLoginPage = false
+    static func start() {
+        guard !started else { return }
+        started = true
+        let signedIn = UserDefaults.standard.bool(forKey: AppModel.signedInKey)
+        let url = signedIn ? FeishuSession.messengerURL : FeishuSignIn.loginURL
+        log("start \(url.absoluteString)")
+        webView.load(URLRequest(url: url))
+    }
 
-        init(isLoading: Binding<Bool>, onSignedIn: @escaping () -> Void) {
-            self.isLoading = isLoading
-            self.onSignedIn = onSignedIn
+    /// Show Feishu's own login page again in the same web view.
+    static func beginLogin() {
+        auth.reset()
+        log("begin login")
+        webView.load(URLRequest(url: FeishuSignIn.loginURL))
+    }
+
+    static func log(_ message: String) {
+        guard CommandLine.arguments.contains("--capture") else { return }
+        FeishuCapture.append(["url": "SYNC-LOG \(message)", "body": ""])
+    }
+}
+
+/// Watches the shared web view's URL. It confirms a sign-in only once the
+/// tenant messenger is genuinely on screen, so a stale cookie that briefly
+/// paints the tenant shell is not mistaken for a valid session.
+final class FeishuAuth: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    private let onSignedIn: () -> Void
+    private var finished = false
+    private var pendingConfirm: DispatchWorkItem?
+    private var latestURL: URL?
+    private var confirmTries = 0
+    /// True once Feishu's own login form has been shown. Completing sign-in
+    /// only after this prevents a cached, half-expired tenant page from
+    /// counting as a successful login.
+    private var sawLoginPage = false
+
+    init(onSignedIn: @escaping () -> Void) {
+        self.onSignedIn = onSignedIn
+    }
+
+    func reset() {
+        finished = false
+        sawLoginPage = false
+        confirmTries = 0
+        pendingConfirm?.cancel()
+        pendingConfirm = nil
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
+        FeishuWebHost.log("start \(webView.url?.absoluteString ?? "nil")")
+        // Any full navigation interrupts a pending "did we really land in
+        // the tenant?" confirmation.
+        pendingConfirm?.cancel()
+        pendingConfirm = nil
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
+        FeishuWebHost.log("finish \(webView.url?.absoluteString ?? "nil")")
+        if let url = webView.url { observe(url) }
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation?) {
+        if let url = webView.url { observe(url) }
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation?, withError error: Error) {
+        FeishuWebHost.log("fail \(error.localizedDescription) \(webView.url?.absoluteString ?? "nil")")
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let raw = message.body as? String, let url = URL(string: raw) else { return }
+        observe(url)
+    }
+
+    private func observe(_ url: URL) {
+        latestURL = url
+        if let host = url.host?.lowercased(), host.hasPrefix("accounts."),
+           url.path.lowercased().contains("/login") {
+            sawLoginPage = true
         }
-
-        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
-            isLoading.wrappedValue = true
-            // Any full navigation interrupts a pending "did we really land in
-            // the tenant?" confirmation.
+        guard !finished, sawLoginPage, FeishuSignIn.isSignedIn(url) else {
+            // Still on the login/refresh page: don't confirm a sign-in.
             pendingConfirm?.cancel()
             pendingConfirm = nil
+            confirmTries = 0
+            return
         }
-
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
-            isLoading.wrappedValue = false
-            if let url = webView.url { observe(url) }
-        }
-
-        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation?) {
-            if let url = webView.url { observe(url) }
-        }
-
-        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard let raw = message.body as? String, let url = URL(string: raw) else { return }
-            observe(url)
-        }
-
-        private func observe(_ url: URL) {
-            latestURL = url
-            if let host = url.host?.lowercased(), host.hasPrefix("accounts."),
-               url.path.lowercased().contains("/login") {
-                sawLoginPage = true
-            }
-            guard !finished, sawLoginPage, FeishuSignIn.isSignedIn(url) else {
-                // Still on the login/refresh page: don't confirm a sign-in.
-                pendingConfirm?.cancel()
-                pendingConfirm = nil
-                return
-            }
-            guard pendingConfirm == nil else { return }
-            // Wait briefly to make sure this is not the tenant page Feishu
-            // briefly shows before bouncing to its session refresh page.
-            let work = DispatchWorkItem { [weak self] in
+        guard pendingConfirm == nil else { return }
+        // Wait briefly to make sure this is not the tenant page Feishu
+        // briefly shows before bouncing to its session refresh page.
+        var work: DispatchWorkItem!
+        work = DispatchWorkItem { [weak self] in
+            guard let self, !self.finished,
+                  let current = self.latestURL, FeishuSignIn.isSignedIn(current) else { return }
+            // A stale cookie paints the tenant shell before the account API
+            // rejects it, so require the messenger itself to be on screen.
+            let probe = "(function(){var t=(document.body&&document.body.innerText)||'';"
+                + "return t.length+':'+(/Chats|聊天|Messages|消息|Search|搜索|Calendar|日历/.test(t)?1:0);})()"
+            FeishuWebHost.webView.evaluateJavaScript(probe) { [weak self] result, _ in
                 guard let self, !self.finished,
                       let current = self.latestURL, FeishuSignIn.isSignedIn(current) else { return }
-                self.finished = true
-                FeishuSession.store(current)
-                self.onSignedIn()
+                var ready = false
+                if let text = result as? String {
+                    let parts = text.split(separator: ":")
+                    if parts.count == 2, let length = Int(parts[0]), let hit = Int(parts[1]) {
+                        ready = length > 200 && hit == 1
+                    }
+                }
+                if ready {
+                    self.finished = true
+                    FeishuSession.store(current)
+                    FeishuWebHost.log("signed in \(current.absoluteString)")
+                    self.onSignedIn()
+                    return
+                }
+                self.confirmTries += 1
+                if self.confirmTries < 15 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+                } else {
+                    self.pendingConfirm = nil
+                }
             }
-            pendingConfirm = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
         }
+        pendingConfirm = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
     }
 }
 
@@ -973,18 +1070,16 @@ final class FeishuSync: NSObject, WKScriptMessageHandler {
 
       async function run() {
         hookProfile();
-        await sleep(1500);
+        await sleep(1200);
         if (onAccountsHost()) {
           // Feishu bounces through accounts.feishu.cn/session-tools/refresh to
-          // renew cookies before returning to the tenant. Give that redirect a
-          // chance instead of treating it as a dead session.
-          if (/session-tools\/refresh/.test(location.pathname)) {
-            await sleep(12000);
-          }
+          // renew cookies before returning to the tenant. Wait for that
+          // redirect instead of calling the session dead after a few seconds.
+          for (var g = 0; g < 20 && onAccountsHost(); g++) await sleep(2000);
           if (onAccountsHost()) {
             post({ kind: 'session', expired: true, url: location.href });
+            return;
           }
-          return;
         }
         post({ kind: 'status', text: 'Reading your conversation list…' });
         var names = [];
@@ -994,7 +1089,17 @@ final class FeishuSync: NSObject, WKScriptMessageHandler {
         }
         if (!names.length) {
           post({ kind: 'debug', url: location.href, note: 'no chat rows', body: (document.body.innerText || '').slice(0, 4000) });
-          return;
+          // The messenger may still be painting its sidebar; keep looking
+          // rather than dropping the import on the floor.
+          post({ kind: 'status', text: 'Waiting for Feishu to finish loading your chats…' });
+          for (var retry = 0; retry < 20 && !names.length; retry++) {
+            await sleep(3000);
+            names = scanChats();
+          }
+          if (!names.length) {
+            post({ kind: 'status', text: 'Feishu is signed in, but its conversation list did not appear.' });
+            return;
+          }
         }
         var times = {};
         var sb = sidebar();
@@ -1150,65 +1255,14 @@ final class FeishuSync: NSObject, WKScriptMessageHandler {
 
 /// Invisible WKWebView that holds the Feishu web session and runs the scraper.
 struct FeishuSyncView: NSViewRepresentable {
-    func makeCoordinator() -> Coordinator { Coordinator() }
-
-    private static func note(_ message: String) {
-        guard CommandLine.arguments.contains("--capture") else { return }
-        FeishuCapture.append(["url": "SYNC-LOG \(message)", "body": ""])
-    }
-
     func makeNSView(context: Context) -> WKWebView {
-        FeishuSyncView.note("creating web view for \(FeishuSession.messengerURL.absoluteString)")
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
-        let controller = WKUserContentController()
-        controller.add(FeishuSync.shared, name: FeishuSync.handler)
-        controller.add(FeishuProfile.shared, name: FeishuProfile.handler)
-        controller.addUserScript(WKUserScript(
-            source: FeishuProfile.script,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: false
-        ))
-        controller.addUserScript(WKUserScript(
-            source: FeishuSync.script,
-            injectionTime: .atDocumentEnd,
-            forMainFrameOnly: false
-        ))
-        if CommandLine.arguments.contains("--capture") {
-            controller.add(FeishuCapture.shared, name: "feishuCapture")
-            controller.addUserScript(WKUserScript(
-                source: FeishuCapture.script,
-                injectionTime: .atDocumentStart,
-                forMainFrameOnly: false
-            ))
-        }
-        configuration.userContentController = controller
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.customUserAgent = FeishuSignIn.browserUserAgent
-        webView.navigationDelegate = context.coordinator
-        webView.load(URLRequest(url: FeishuSession.messengerURL))
+        FeishuWebHost.start()
+        let webView = FeishuWebHost.webView
+        if webView.superview != nil { webView.removeFromSuperview() }
         return webView
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {}
-
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
-            FeishuSyncView.note("start \(webView.url?.absoluteString ?? "nil")")
-        }
-
-        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation?) {
-            FeishuSyncView.note("commit \(webView.url?.absoluteString ?? "nil")")
-        }
-
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
-            FeishuSyncView.note("finish \(webView.url?.absoluteString ?? "nil")")
-        }
-
-        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation?, withError error: Error) {
-            FeishuSyncView.note("fail \(error.localizedDescription) \(webView.url?.absoluteString ?? "nil")")
-        }
-    }
 }
 
 // MARK: - Import progress
