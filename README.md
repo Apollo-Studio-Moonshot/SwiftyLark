@@ -83,5 +83,11 @@ tests in this workspace).
 - Everything persists through the Rust core; sending, reacting, reading and
   task toggles all round-trip through it.
 
-Not in this version: real Feishu sign-in/network sync (the demo workspace is
-local), meetings, mail, wiki, moments and the AI assistant. See `MECHANICS.md`.
+The app opens on a sign-in screen. "Sign in with Feishu" shows Feishu's own login
+page inside the app (a `WKWebView`, the same pattern MeloX uses); once Feishu
+moves the web view to your tenant messenger, the session is kept and the app
+enters the workspace.
+
+Not in this version: importing Feishu data into the native screens (the
+workspace content stays local after sign-in), network sync, meetings, mail,
+wiki, moments and the AI assistant. See `MECHANICS.md`.

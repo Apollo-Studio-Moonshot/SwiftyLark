@@ -379,9 +379,12 @@ final class AppModel: ObservableObject {
     @Published var showSettings = false
     @Published var loading = true
     @Published var toast: String?
-    /// Signing in happens on Feishu's own web page; until that returns a session
-    /// there is no workspace to show, so the demo data is never loaded.
-    @Published var signedIn = false
+    /// Set once Feishu's own login page has completed inside the app (MeloX-style
+    /// cookie login). The flag is kept so the persisted Feishu session is reused
+    /// on the next launch instead of asking to log in again.
+    @Published var signedIn = UserDefaults.standard.bool(forKey: AppModel.signedInKey)
+
+    static let signedInKey = "feishu.signedIn"
 
     enum ChatFilter: String, CaseIterable, Identifiable {
         case all = "All"
@@ -406,6 +409,7 @@ final class AppModel: ObservableObject {
         }
         // No default workspace: nothing is read from the core until the user
         // has signed in, so the app opens on the sign-in screen instead.
+        if signedIn { load() }
         // keep the list times fresh and pick up core-side changes
         let t = DispatchSource.makeTimerSource(queue: .main)
         t.schedule(deadline: .now() + 30, repeating: 30)
@@ -463,6 +467,13 @@ final class AppModel: ObservableObject {
                 self.stats = st
             }
         }
+    }
+
+    /// Feishu's login page reached the tenant messenger inside the login sheet.
+    func completeSignIn() {
+        UserDefaults.standard.set(true, forKey: AppModel.signedInKey)
+        signedIn = true
+        load()
     }
 
     private func apply(_ p: StatePayload, keepSelection: Bool = false) {

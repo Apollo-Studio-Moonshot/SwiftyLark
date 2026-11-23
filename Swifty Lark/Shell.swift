@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import WebKit
 
 // Lets the empty parts of our custom title bar drag the window.
 struct WindowDragArea: NSViewRepresentable {
@@ -102,19 +103,28 @@ struct RootView: View {
 
 // MARK: - Sign in
 
-/// Feishu's own web sign-in page. Authentication happens on Feishu's site in
-/// the default browser, so the app never handles the password itself.
+/// Feishu's own web sign-in page, shown inside the app. Login happens on
+/// Feishu's site; the app only waits for the session to land on the tenant
+/// messenger, the same way MeloX logs in with its embedded web view.
 enum FeishuSignIn {
-    static let loginURL = URL(string: "https://accounts.feishu.cn/accounts/page/login")!
+    // Feishu rejects the bare /accounts/page/login route with error 4401, so the
+    // link carries the same app_id and redirect back into Feishu's web messenger
+    // that feishu.cn uses for its own "Log in" entry point.
+    static let loginURL = URL(string: "https://accounts.feishu.cn/accounts/page/login?app_id=1&no_trap=1&redirect_uri=https%3A%2F%2Fwww.feishu.cn%2Fmessenger")!
 
-    static func openInBrowser() {
-        NSWorkspace.shared.open(loginURL)
+    /// Once Feishu has accepted the login it moves the web view to the tenant's
+    /// own host, e.g. icc.28kp7d5w3.feishu.cn/next/messenger/.
+    static func isSignedIn(_ url: URL?) -> Bool {
+        guard let url, let host = url.host?.lowercased() else { return false }
+        guard host.hasSuffix(".feishu.cn") || host.hasSuffix(".larksuite.com") else { return false }
+        return url.path.contains("/next/messenger")
     }
 }
 
 struct SignInView: View {
+    @EnvironmentObject var model: AppModel
     @Environment(\.palette) private var p
-    @State private var opened = false
+    @State private var showLogin = CommandLine.arguments.contains("--login")
 
     var body: some View {
         ZStack {
@@ -128,6 +138,11 @@ struct SignInView: View {
             .padding(.horizontal, 40)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .sheet(isPresented: $showLogin) {
+            FeishuLoginSheet()
+                .environmentObject(model)
+                .environment(\.palette, p)
+        }
     }
 
     private var card: some View {
@@ -150,18 +165,18 @@ struct SignInView: View {
                 Text("Sign in to Feishu")
                     .font(.system(size: 19, weight: .bold))
                     .foregroundColor(p.textPrimary)
-                Text("Swifty Lark opens Feishu's official sign-in page in your browser.")
+                Text("Feishu's own sign-in page opens right here, without leaving the app.")
                     .font(.system(size: 12))
                     .foregroundColor(p.textSecondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Button(action: open) {
+            Button { showLogin = true } label: {
                 HStack(spacing: 8) {
-                    Text(opened ? "Open Feishu again" : "Sign in with Feishu")
-                    Image(systemName: "arrow.up.right.square")
-                        .font(.system(size: 12, weight: .semibold))
+                    Image(systemName: "person.crop.circle.badge.checkmark")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Sign in with Feishu")
                 }
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.white)
@@ -170,11 +185,9 @@ struct SignInView: View {
                 .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(p.accent))
             }
             .buttonStyle(.plain)
-            .help("Open accounts.feishu.cn in your default browser")
+            .help("Sign in on accounts.feishu.cn inside this app")
 
-            Text(opened
-                 ? "Feishu is open in your browser — finish signing in there."
-                 : "You'll sign in on accounts.feishu.cn. Swifty Lark never sees your password.")
+            Text("You'll sign in on accounts.feishu.cn. Swifty Lark never sees your password.")
                 .font(.system(size: 10.5))
                 .foregroundColor(p.textMuted)
                 .multilineTextAlignment(.center)
@@ -194,11 +207,6 @@ struct SignInView: View {
         )
     }
 
-    private func open() {
-        FeishuSignIn.openInBrowser()
-        opened = true
-    }
-
     private var background: some View {
         ZStack {
             p.dark ? Color(hex: "#0d0e10") : Color(hex: "#f5f7fa")
@@ -210,6 +218,99 @@ struct SignInView: View {
             )
         }
         .ignoresSafeArea()
+    }
+}
+
+struct FeishuLoginSheet: View {
+    @EnvironmentObject var model: AppModel
+    @Environment(\.palette) private var p
+    @Environment(\.dismiss) private var dismiss
+    @State private var loading = true
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundColor(p.textSecondary)
+                    .frame(width: 56, alignment: .leading)
+                Spacer()
+                VStack(spacing: 1) {
+                    Text("Sign in to Feishu")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(p.textPrimary)
+                    Text("accounts.feishu.cn")
+                        .font(.system(size: 10))
+                        .foregroundColor(p.textMuted)
+                }
+                Spacer()
+                ProgressView()
+                    .controlSize(.small)
+                    .opacity(loading ? 1 : 0)
+                    .frame(width: 56, alignment: .trailing)
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 54)
+            Rectangle().fill(p.borderSoft).frame(height: 1)
+            FeishuLoginWebView(isLoading: $loading) {
+                model.completeSignIn()
+                dismiss()
+            }
+        }
+        .frame(width: 880, height: 680)
+        .background(p.content)
+    }
+}
+
+struct FeishuLoginWebView: NSViewRepresentable {
+    @Binding var isLoading: Bool
+    var onSignedIn: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isLoading: $isLoading, onSignedIn: onSignedIn)
+    }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        // The default store keeps Feishu's cookies, so the session survives quits.
+        configuration.websiteDataStore = .default()
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        webView.load(URLRequest(url: FeishuSignIn.loginURL))
+        return webView
+    }
+
+    func updateNSView(_ nsView: WKWebView, context: Context) {}
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        private let isLoading: Binding<Bool>
+        private let onSignedIn: () -> Void
+        private var finished = false
+
+        init(isLoading: Binding<Bool>, onSignedIn: @escaping () -> Void) {
+            self.isLoading = isLoading
+            self.onSignedIn = onSignedIn
+        }
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
+            isLoading.wrappedValue = true
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
+            isLoading.wrappedValue = false
+            check(webView.url)
+        }
+
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation?) {
+            check(webView.url)
+        }
+
+        private func check(_ url: URL?) {
+            guard !finished, FeishuSignIn.isSignedIn(url) else { return }
+            finished = true
+            onSignedIn()
+        }
     }
 }
 
