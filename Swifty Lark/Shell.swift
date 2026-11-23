@@ -59,6 +59,11 @@ struct RootView: View {
                         .frame(width: 1200, height: 800)
                         .opacity(0.01)
                         .allowsHitTesting(false)
+                    // Second offscreen client for Contacts/Tasks/Calendar/Docs.
+                    FeishuModulesView()
+                        .frame(width: 1200, height: 800)
+                        .opacity(0.01)
+                        .allowsHitTesting(false)
                 }
             } else {
                 SignInView()
@@ -145,6 +150,14 @@ enum FeishuSignIn {
         guard let url, let host = url.host?.lowercased() else { return false }
         guard host.hasSuffix(".feishu.cn") || host.hasSuffix(".larksuite.com") else { return false }
         return url.path.contains("/next/messenger")
+    }
+
+    /// Feishu's actual login form. `accounts.feishu.cn` also hosts session
+    /// refresh and SSO hops, which must not be mistaken for a signed-out page.
+    static func isLoginPage(_ url: URL?) -> Bool {
+        guard let url, let host = url.host?.lowercased() else { return false }
+        guard host.hasPrefix("accounts.") || host.hasPrefix("login.") else { return false }
+        return url.path.lowercased().contains("/login")
     }
 }
 
@@ -327,22 +340,26 @@ enum FeishuWebHost {
         let controller = WKUserContentController()
         controller.add(FeishuSync.shared, name: FeishuSync.handler)
         controller.add(FeishuProfile.shared, name: FeishuProfile.handler)
+        // Feishu keeps its session alive with a hidden
+        // accounts.feishu.cn/session-tools/refresh iframe. Running the scraper
+        // in subframes makes that iframe look like a signed-out page and logs
+        // the user out, so all of these run in the top frame only.
         controller.addUserScript(WKUserScript(
             source: FeishuProfile.script,
             injectionTime: .atDocumentStart,
-            forMainFrameOnly: false
+            forMainFrameOnly: true
         ))
         controller.addUserScript(WKUserScript(
             source: FeishuSync.script,
             injectionTime: .atDocumentEnd,
-            forMainFrameOnly: false
+            forMainFrameOnly: true
         ))
         if CommandLine.arguments.contains("--capture") {
             controller.add(FeishuCapture.shared, name: "feishuCapture")
             controller.addUserScript(WKUserScript(
                 source: FeishuCapture.script,
                 injectionTime: .atDocumentStart,
-                forMainFrameOnly: false
+                forMainFrameOnly: true
             ))
         }
         // Feishu's login flow switches routes without a full page load, so the
@@ -360,8 +377,14 @@ enum FeishuWebHost {
         )
         webView.customUserAgent = FeishuSignIn.browserUserAgent
         webView.navigationDelegate = auth
+        webView.uiDelegate = windowDelegate
         return webView
     }()
+
+    /// Feishu's rail opens some modules with window.open(); without a UI
+    /// delegate those requests are dropped. Load them in the same web view so
+    /// the session (and the scraper) follows the user into Calendar/Docs.
+    private static let windowDelegate = FeishuWindowDelegate()
 
     private static let auth = FeishuAuth {
         DispatchQueue.main.async {
@@ -374,10 +397,78 @@ enum FeishuWebHost {
     static func start() {
         guard !started else { return }
         started = true
+        if let arg = CommandLine.arguments.first(where: { $0.hasPrefix("--visit=") }) {
+            let raw = String(arg.dropFirst("--visit=".count))
+            let target = raw.hasPrefix("http")
+                ? URL(string: raw)
+                : URL(string: raw, relativeTo: FeishuSession.messengerURL)
+            if let target {
+                log("visit \(target.absoluteString)")
+                webView.load(URLRequest(url: target))
+                return
+            }
+        }
         let signedIn = UserDefaults.standard.bool(forKey: AppModel.signedInKey)
         let url = signedIn ? FeishuSession.messengerURL : FeishuSignIn.loginURL
         log("start \(url.absoluteString)")
         webView.load(URLRequest(url: url))
+        if CommandLine.arguments.contains("--tour") { tour() }
+    }
+
+    /// Capture-only debugging helper: walks the web client's modules and dumps
+    /// each one's URL and visible text, so importers can be written against the
+    /// real DOM.
+    private static func tour() {
+        let labels = ["Docs", "Calendar", "Contacts", "Tasks"]
+        let click = #"""
+        (function (label) {
+          function fire(el) {
+            var r = el.getBoundingClientRect();
+            var x = r.left + r.width / 2, y = r.top + r.height / 2;
+            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function (t) {
+              try {
+                var E = (t.indexOf('pointer') === 0 && window.PointerEvent) ? PointerEvent : MouseEvent;
+                el.dispatchEvent(new E(t, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 }));
+              } catch (e) {}
+            });
+            try { el.click(); } catch (e) {}
+          }
+          var all = document.querySelectorAll('*');
+          for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            if (el.children.length > 2) continue;
+            var t = (el.innerText || '').trim();
+            var a = (el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title'))) || '';
+            if (t === label || a === label) {
+              var r = el.getBoundingClientRect();
+              if (r.width > 0 && r.height > 0) { fire(el); return 'ok ' + Math.round(r.x) + ',' + Math.round(r.y); }
+            }
+          }
+          return 'not found';
+        })(LABEL)
+        """#
+        let dump = #"""
+        (function () { return location.href + '\n' + (document.body ? document.body.innerText.slice(0, 24000) : ''); })()
+        """#
+        var index = 0
+        func step() {
+            guard index < labels.count else { return }
+            let label = labels[index]
+            index += 1
+            let js = click.replacingOccurrences(of: "LABEL", with: "'" + label + "'")
+            webView.evaluateJavaScript(js) { result, _ in
+                log("tour \(label) click \(String(describing: result))")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 9) {
+                webView.evaluateJavaScript(dump) { result, _ in
+                    if let text = result as? String {
+                        FeishuCapture.append(["url": "TOUR \(label)", "body": text])
+                    }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 11, execute: step)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: step)
     }
 
     /// Show Feishu's own login page again in the same web view.
@@ -385,6 +476,12 @@ enum FeishuWebHost {
         auth.reset()
         log("begin login")
         webView.load(URLRequest(url: FeishuSignIn.loginURL))
+    }
+
+    /// Re-open the tenant messenger so the chat scraper runs again.
+    static func reload() {
+        log("reload")
+        webView.load(URLRequest(url: FeishuSession.messengerURL))
     }
 
     static func log(_ message: String) {
@@ -499,6 +596,24 @@ final class FeishuAuth: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     }
 }
 
+/// Feishu opens some modules (Calendar, Docs) with `window.open`. An unset
+/// `WKUIDelegate` silently drops those requests, so route them into the same
+/// web view and keep the signed-in session with them.
+final class FeishuWindowDelegate: NSObject, WKUIDelegate {
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        if let url = navigationAction.request.url {
+            FeishuWebHost.log("popup \(url.absoluteString)")
+            webView.load(navigationAction.request)
+        }
+        return nil
+    }
+}
+
 /// Bridge from Feishu's own web client: forwards JSON API responses to Swift so
 /// they can be mapped into the Rust store. Only active with `--capture`.
 final class FeishuCapture: NSObject, WKScriptMessageHandler {
@@ -506,7 +621,9 @@ final class FeishuCapture: NSObject, WKScriptMessageHandler {
     private let queue = DispatchQueue(label: "swiftylark.feishu.capture")
     private var bytes = 0
 
-    static let script = """
+    // Raw string: the script embeds a JS regex `/\n/`, which a normal Swift
+    // literal would turn into a real newline and break the injected source.
+    static let script = #"""
     (function () {
       if (window.__swiftyCapture) return;
       window.__swiftyCapture = true;
@@ -616,8 +733,57 @@ final class FeishuCapture: NSObject, WKScriptMessageHandler {
           send('DOM', out.join('\n'), 'dom');
         } catch (e) { send('DOMERR', String(e), 'dom'); }
       }, 17000);
+      setTimeout(function () {
+        try {
+          var out = [];
+          var seen = {};
+          var els = document.querySelectorAll('a[href],[role="link"],[aria-label],[data-testid]');
+          for (var i = 0; i < els.length && out.length < 300; i++) {
+            var n = els[i];
+            var href = n.href || n.getAttribute('href') || '';
+            var label = n.getAttribute('aria-label') || n.getAttribute('data-testid') || '';
+            var key = href + '|' + label;
+            if (seen[key]) continue;
+            seen[key] = true;
+            if (!href && !label) continue;
+            out.push([n.tagName, label.slice(0, 60), String(href).slice(0, 160), (n.innerText || '').slice(0, 60).replace(/\n/g, ' | ')].join(' ~ '));
+          }
+          send('LINKS', out.join('\n'), 'links');
+        } catch (e) { send('LINKERR', String(e), 'links'); }
+      }, 9000);
+      setTimeout(function () {
+        try {
+          var sels = '[role="listitem"],[role="row"],tr,[data-testid],[class*="contact"],[class*="task"],[class*="todo"],[class*="event"],[class*="doc"],[class*="calendar"],[class*="check"],[class*="row"],[class*="cell"],[class*="feed"],input,[aria-checked]';
+          var out = [];
+          var seen = {};
+          var els = document.querySelectorAll(sels);
+          for (var i = 0; i < els.length && out.length < 500; i++) {
+            var n = els[i];
+            var r = n.getBoundingClientRect();
+            if (r.width < 40 || r.height < 16) continue;
+            var t = (n.innerText || '').trim();
+            if (!t || t.length > 300) continue;
+            var key = n.tagName + '|' + n.className + '|' + t.slice(0, 50);
+            if (seen[key]) continue;
+            seen[key] = 1;
+            out.push([
+              n.tagName, (n.getAttribute('role') || ''), (n.getAttribute('data-testid') || ''),
+              String(n.className || '').slice(0, 80),
+              Math.round(r.x) + ',' + Math.round(r.y) + ' ' + Math.round(r.width) + 'x' + Math.round(r.height),
+              t.replace(/\n/g, ' / ').slice(0, 180)
+            ].join(' ~ '));
+          }
+          send('PROBE', out.join('\n'), 'probe');
+          var evs = document.querySelectorAll('.event-instance');
+          for (var e = 0; e < evs.length && e < 25; e++) {
+            var at = evs[e].attributes, parts = [];
+            for (var q = 0; q < at.length; q++) parts.push(at[q].name + '=' + String(at[q].value).slice(0, 90));
+            send('EVATTR', parts.join(' ; ') + ' ;; ' + (evs[e].outerHTML || '').slice(0, 500), 'evattr');
+          }
+        } catch (e) { send('PROBEERR', String(e), 'probe'); }
+      }, 12000);
     })();
-    """
+    """#
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let payload = message.body as? [String: Any],
@@ -704,6 +870,7 @@ final class FeishuProfile: NSObject, WKScriptMessageHandler {
 
     static let script = #"""
     (function () {
+      if (window.top !== window) return;
       if (window.__swiftyProfile) return;
       window.__swiftyProfile = true;
       function send(url, body) {
@@ -811,6 +978,7 @@ final class FeishuSync: NSObject, WKScriptMessageHandler {
 
     static let script = #"""
     (function () {
+      if (window.top !== window) return;
       if (window.__swiftySync) return;
       window.__swiftySync = true;
       var MH = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.feishuSync;
@@ -865,6 +1033,13 @@ final class FeishuSync: NSObject, WKScriptMessageHandler {
       function onAccountsHost() {
         var host = location.host || '';
         return host.indexOf('accounts.') === 0 || host.indexOf('login.') === 0;
+      }
+
+      // accounts.feishu.cn also serves session-tools/refresh and SSO hops that
+      // are part of a healthy session. Only the login form itself means the
+      // user is actually signed out.
+      function onLoginHost() {
+        return onAccountsHost() && /\/login/.test(location.pathname);
       }
 
       function sidebar() {
@@ -1069,17 +1244,22 @@ final class FeishuSync: NSObject, WKScriptMessageHandler {
       }
 
       async function run() {
+        // The messenger and its login flow live in the top frame. Subframes
+        // (such as the accounts session heartbeat) never carry the session.
+        if (window.top !== window) return;
         hookProfile();
         await sleep(1200);
         if (onAccountsHost()) {
-          // Feishu bounces through accounts.feishu.cn/session-tools/refresh to
-          // renew cookies before returning to the tenant. Wait for that
-          // redirect instead of calling the session dead after a few seconds.
-          for (var g = 0; g < 20 && onAccountsHost(); g++) await sleep(2000);
-          if (onAccountsHost()) {
+          // A session refresh or SSO redirect is not a sign-out: ignore every
+          // accounts page until Feishu's actual login form is on screen.
+          if (!onLoginHost()) return;
+          // A successful login leaves this page for the tenant, so only report
+          // an expired session if the login form is still here afterwards.
+          for (var g = 0; g < 10 && onLoginHost(); g++) await sleep(2000);
+          if (onLoginHost()) {
             post({ kind: 'session', expired: true, url: location.href });
-            return;
           }
+          return;
         }
         post({ kind: 'status', text: 'Reading your conversation list…' });
         var names = [];
@@ -1125,13 +1305,20 @@ final class FeishuSync: NSObject, WKScriptMessageHandler {
         post({ kind: 'done' });
       }
 
+      var started = false;
       function start() {
+        if (started) return;
+        started = true;
         run().catch(function (e) {
           post({ kind: 'debug', url: location.href, note: 'error', error: String(e) });
         });
       }
       if (document.readyState === 'complete') setTimeout(start, 1800);
       else window.addEventListener('load', function () { setTimeout(start, 1800); }, true);
+      // The messenger keeps long-lived connections open, so `load` can be late
+      // or never fire. Start anyway; run() keeps retrying until the sidebar
+      // appears, so starting early costs nothing.
+      setTimeout(start, 4000);
     })();
     """#
 
@@ -1253,6 +1440,494 @@ final class FeishuSync: NSObject, WKScriptMessageHandler {
     }
 }
 
+// MARK: - Module import
+
+/// Imports the rest of the workspace from Feishu's other web apps. Contacts,
+/// Tasks, Calendar and Docs each load as their own micro-frontend, so this uses
+/// a second offscreen WKWebView that shares the sign-in cookie store, walks the
+/// routes one at a time, and hands the collected JSON to the core.
+final class FeishuModules: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    static let shared = FeishuModules()
+    static let handler = "feishuModules"
+    static let didImport = Notification.Name("swiftylark.feishu.modulesImported")
+
+    private struct Route {
+        let kind: String
+        let path: String
+    }
+
+    private let routes = [
+        Route(kind: "contacts", path: "/next/contacts/"),
+        Route(kind: "tasks", path: "/next/task/today"),
+        Route(kind: "events", path: "/calendar/week"),
+        Route(kind: "docs", path: "/drive/home/"),
+    ]
+
+    private var webView: WKWebView?
+    private let windowDelegate = FeishuWindowDelegate()
+    private var index = 0
+    private var attempts = 0
+    private var generation = 0
+    private var running = false
+    private var collected: [String: [[String: Any]]] = [:]
+
+    /// Starts (or restarts) the walk. Safe to call when already running.
+    func refresh() {
+        guard !running, UserDefaults.standard.bool(forKey: AppModel.signedInKey) else { return }
+        running = true
+        index = 0
+        attempts = 0
+        collected = [:]
+        loadCurrent()
+    }
+
+    private func hostURL() -> URL {
+        var comps = URLComponents(url: FeishuSession.messengerURL, resolvingAgainstBaseURL: false)
+        comps?.path = ""
+        comps?.query = nil
+        comps?.fragment = nil
+        return comps?.url ?? FeishuSignIn.messengerURL
+    }
+
+    private func web() -> WKWebView {
+        if let webView { return webView }
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        let controller = WKUserContentController()
+        controller.add(self, name: FeishuModules.handler)
+        controller.addUserScript(WKUserScript(
+            source: FeishuModules.hookScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        config.userContentController = controller
+        let view = WKWebView(
+            frame: NSRect(x: 0, y: 0, width: 1200, height: 800),
+            configuration: config
+        )
+        view.customUserAgent = FeishuSignIn.browserUserAgent
+        view.navigationDelegate = self
+        view.uiDelegate = windowDelegate
+        webView = view
+        return view
+    }
+
+    /// The offscreen host view attaches this instance so WebKit lays out the
+    /// module pages (innerText and element rects need a live window).
+    func attachableView() -> WKWebView {
+        let view = web()
+        if view.superview != nil { view.removeFromSuperview() }
+        return view
+    }
+
+    private func loadCurrent() {
+        guard index < routes.count else { finish(); return }
+        let route = routes[index]
+        guard let url = URL(string: route.path, relativeTo: hostURL()) else {
+            index += 1
+            loadCurrent()
+            return
+        }
+        attempts = 0
+        generation += 1
+        let gen = generation
+        FeishuWebHost.log("modules load \(url.absoluteString)")
+        web().load(URLRequest(url: url))
+        // These apps keep sockets open, so didFinish is unreliable; survey the
+        // page on a timer and retry until its list has content.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 7) { [weak self] in
+            self?.scrape(gen)
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
+        FeishuWebHost.log("modules finish \(webView.url?.absoluteString ?? "nil")")
+    }
+
+    private func scrape(_ gen: Int) {
+        guard running, gen == generation, index < routes.count else { return }
+        web().evaluateJavaScript(FeishuModules.script) { [weak self] result, _ in
+            guard let self, self.running, gen == self.generation, self.index < self.routes.count else { return }
+            self.handle(result, gen)
+        }
+    }
+
+    private func handle(_ result: Any?, _ gen: Int) {
+        guard running else { return }
+        let expected = routes[index]
+        var kind = expected.kind
+        var items: [[String: Any]] = []
+        var done = false
+        if let text = result as? String,
+           let data = text.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let k = obj["kind"] as? String, !k.isEmpty { kind = k }
+            items = obj["items"] as? [[String: Any]] ?? []
+            done = obj["done"] as? Bool ?? false
+        }
+        // Contacts arrive a viewport at a time while the list scrolls.
+        if expected.kind == "contacts" {
+            mergeContacts(items)
+            if done || attempts >= 50 {
+                FeishuWebHost.log("modules contacts \(collected[kind]?.count ?? 0)")
+                index += 1
+                loadCurrent()
+            } else {
+                attempts += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                    self?.scrape(gen)
+                }
+            }
+            return
+        }
+        if !items.isEmpty {
+            collected[kind] = items
+            FeishuWebHost.log("modules \(kind) \(items.count)")
+            index += 1
+            loadCurrent()
+            return
+        }
+        attempts += 1
+        if attempts < 6 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                self?.scrape(gen)
+            }
+        } else {
+            FeishuWebHost.log("modules \(expected.kind) empty")
+            index += 1
+            loadCurrent()
+        }
+    }
+
+    private func mergeContacts(_ items: [[String: Any]]) {
+        var byKey: [String: [String: Any]] = [:]
+        for c in collected["contacts"] ?? [] {
+            if let key = contactKey(c) { byKey[key] = c }
+        }
+        for c in items {
+            if let key = contactKey(c) { byKey[key] = c }
+        }
+        collected["contacts"] = Array(byKey.values)
+    }
+
+    private func contactKey(_ c: [String: Any]) -> String? {
+        if let email = c["email"] as? String, !email.isEmpty { return email }
+        if let name = c["name"] as? String, !name.isEmpty { return name }
+        return nil
+    }
+
+    private func finish() {
+        running = false
+        // Release the micro-frontends; they are the heavy part of this walk.
+        webView?.load(URLRequest(url: URL(string: "about:blank")!))
+        guard !collected.isEmpty else { return }
+        let payload = collected
+        let summary = payload.map { "\($0.key)=\($0.value.count)" }.sorted().joined(separator: " ")
+        FeishuWebHost.log("modules done \(summary)")
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: FeishuModules.didImport,
+                object: nil,
+                userInfo: ["payload": payload]
+            )
+        }
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {}
+
+    /// Keeps the docs app's own recent-list JSON so it can be mapped without
+    /// re-creating its query parameters or headers.
+    static let hookScript = #"""
+    (function () {
+      if (window.__swiftyModuleHook) return;
+      window.__swiftyModuleHook = true;
+      function keep(url, text) {
+        try { if (String(url).indexOf('/space/api/explorer/recent/list') >= 0) window.__swiftyDocsRaw = text; } catch (e) {}
+      }
+      var of = window.fetch;
+      window.fetch = function () {
+        var a = arguments;
+        var u = (a[0] && a[0].url) ? a[0].url : String(a[0]);
+        return of.apply(this, a).then(function (res) {
+          try {
+            var ct = res.headers.get('content-type') || '';
+            if (ct.indexOf('json') >= 0) res.clone().text().then(function (t) { keep(u, t); }).catch(function () {});
+          } catch (e) {}
+          return res;
+        });
+      };
+      var oo = XMLHttpRequest.prototype.open;
+      var os = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function (m, u) { this.__swiftyURL = u; return oo.apply(this, arguments); };
+      XMLHttpRequest.prototype.send = function () {
+        var x = this;
+        x.addEventListener('load', function () { try { keep(x.__swiftyURL, x.responseText); } catch (e) {} });
+        return os.apply(this, arguments);
+      };
+    })();
+    """#
+
+    static let script = #"""
+    (function () {
+      function lines(el) {
+        return ((el && el.innerText) || '').split(String.fromCharCode(10))
+          .map(function (s) { return s.trim(); }).filter(Boolean);
+      }
+      function deepAll(sel) {
+        var out = [];
+        function walk(root) {
+          try { var l = root.querySelectorAll(sel); for (var i = 0; i < l.length; i++) out.push(l[i]); } catch (e) {}
+          try {
+            var all = root.querySelectorAll('*');
+            for (var j = 0; j < all.length; j++) { if (all[j].shadowRoot) walk(all[j].shadowRoot); }
+          } catch (e) {}
+        }
+        walk(document);
+        return out;
+      }
+      var EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+[.][A-Za-z]{2,}/;
+      function hasCJK(s) {
+        for (var i = 0; i < s.length; i++) { var c = s.charCodeAt(i); if (c >= 19968 && c <= 40959) return true; }
+        return false;
+      }
+      function isYear(s) { return /^(19|20)[0-9][0-9]$/.test(s); }
+
+      function parseContacts(text, out, seen) {
+        var ls = text.split(String.fromCharCode(10)).map(function (s) { return s.trim(); }).filter(Boolean);
+        for (var i = 0; i < ls.length; i++) {
+          var m = ls[i].match(EMAIL);
+          if (!m) continue;
+          var email = m[0];
+          if (seen[email]) continue;
+          var block = [];
+          for (var j = i - 1; j >= 0 && block.length < 4; j--) {
+            if (EMAIL.test(ls[j])) break;
+            block.unshift(ls[j]);
+          }
+          var name = '', dept = '', bio = '';
+          if (block.length && (block[0].indexOf(',') >= 0 || hasCJK(block[0]))) name = block[0];
+          for (var k = 1; k < block.length; k++) {
+            if (isYear(block[k]) || /^[0-9]{4}级$/.test(block[k])) dept = block[k];
+            else if (!bio && block[k].length <= 80) bio = block[k];
+          }
+          if (!name) continue;
+          seen[email] = 1;
+          out.push({ name: name, email: email, dept: dept, title: '', status: '', phone: '', timezone: '', bio: bio });
+        }
+      }
+
+      // The org directory is virtualized, so this advances the list by one
+      // screenful per call and accumulates every row it has seen. The app's
+      // native side keeps calling until `done` is true.
+      function scrapeContacts() {
+        var st = window.__swiftyContactsState;
+        if (!st || !st.best || !st.best.isConnected) {
+          var best = null, bestLen = 1e9;
+          var containers = deepAll('div,ul,ol,section');
+          for (var i = 0; i < containers.length; i++) {
+            var t = containers[i].innerText || '';
+            var count = t.split('@').length - 1;
+            if (count >= 3 && t.length < bestLen) { bestLen = t.length; best = containers[i]; }
+          }
+          // The directory has not painted yet: report unfinished so the app
+          // retries instead of ending the walk with zero contacts.
+          if (!best) return JSON.stringify({ kind: 'contacts', items: [], done: false });
+          var scrollers = [], el = best;
+          while (el && el !== document.body) {
+            if (el.scrollHeight > el.clientHeight + 20) scrollers.push(el);
+            el = el.parentElement;
+          }
+          var se = document.scrollingElement;
+          if (se && se.scrollHeight > se.clientHeight + 20) scrollers.push(se);
+          st = { best: best, scrollers: scrollers, seen: {}, items: [], idle: 0, steps: 0 };
+          window.__swiftyContactsState = st;
+        }
+        function collect() {
+          var text = st.best ? st.best.innerText : ((document.body && document.body.innerText) || '');
+          parseContacts(text, st.items, st.seen);
+        }
+        collect();
+        var moved = false;
+        st.scrollers.forEach(function (s) {
+          var before = s.scrollTop;
+          s.scrollTop = Math.min(s.scrollHeight, s.scrollTop + Math.max(240, s.clientHeight * 0.85));
+          if (s.scrollTop > before + 1) moved = true;
+        });
+        st.steps++;
+        if (moved) st.idle = 0; else st.idle++;
+        collect();
+        var done = st.steps >= 60 || st.idle >= 6 || !st.scrollers.length;
+        return JSON.stringify({ kind: 'contacts', items: st.items, done: done });
+      }
+
+      function scrapeTasks() {
+        var out = [], seen = {};
+        var boxes = deepAll('input[type=checkbox],[role=checkbox],[aria-checked],[class*=checkbox],[class*=Checkbox]');
+        for (var i = 0; i < boxes.length && out.length < 300; i++) {
+          var b = boxes[i], el = b, row = null;
+          for (var up = 0; up < 5 && el; up++, el = el.parentElement) {
+            var t = (el.innerText || '').trim();
+            if (t && t.length < 220) { row = el; break; }
+          }
+          if (!row) continue;
+          var ls = lines(row);
+          if (!ls.length || ls[0].length > 180) continue;
+          var title = ls[0];
+          if (seen[title]) continue;
+          seen[title] = 1;
+          var done = !!(b.checked || b.getAttribute('aria-checked') === 'true');
+          var due = '', list = '';
+          for (var k = 1; k < ls.length; k++) {
+            if (!due && /[0-9]{1,2}:[0-9]{2}/.test(ls[k])) due = ls[k];
+            else if (!list && ls[k].length < 80) list = ls[k];
+          }
+          out.push({ title: title, done: done, due: due, list: list, assignee: '' });
+        }
+        if (!out.length) {
+          var text = (document.body && document.body.innerText) || '';
+          var ls2 = text.split(String.fromCharCode(10)).map(function (s) { return s.trim(); }).filter(Boolean);
+          var start = -1;
+          for (var i = 0; i < ls2.length; i++) {
+            if (/^(Auto-Updates|Recent focus|Start fresh here)/i.test(ls2[i])) start = i;
+          }
+          // Without the task section the page is still the sidebar shell; wait
+          // for another pass rather than importing navigation labels.
+          if (start < 0) return [];
+          var skip = /^(Update|Tasks|Today|Free now|My Notes|Owned|Subscribed|Activities|Connect Agents|Quick Access|All Tasks|Created|Assigned|Completed|Task List|New Group|Chat|My agents|No agents yet|Connect|Auto|Jot down ideas|Download Feishu|Search|We strongly recommend|Enable desktop notifications)/i;
+          for (var j = start + 1; j < ls2.length && j < start + 60; j++) {
+            var l = ls2[j];
+            if (l.length < 2 || l.length > 180 || skip.test(l) || /^[0-9]{1,3}$/.test(l) || seen[l]) continue;
+            if (l.indexOf('(⌘+K)') >= 0 || l.indexOf('@') >= 0) continue;
+            seen[l] = 1;
+            out.push({ title: l, done: false, due: '', list: 'Today', assignee: '' });
+          }
+        }
+        return out;
+      }
+
+      function clockOf(s) {
+        var m = s.match(/([0-9]{1,2}):([0-9]{2})/);
+        return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : -1;
+      }
+
+      function offsetForDay(dnum) {
+        var now = new Date();
+        var base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        var d = new Date(now.getFullYear(), now.getMonth(), dnum);
+        var diff = Math.round((d - base) / 86400000);
+        if (diff < -20) diff += new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+        if (diff > 20) diff -= new Date(now.getFullYear(), now.getMonth(), 0).getDate();
+        return diff;
+      }
+
+      function scrapeEvents() {
+        var out = [], seen = {};
+        var nodes = deepAll('.event-instance,[class*=event-instance]');
+        var heads = deepAll('.calendar-header [class*=Cale]');
+        var colW = 126, startX = 316, todayCol = new Date().getDay(), dayNums = [];
+        if (heads.length >= 7) {
+          var rects = heads.map(function (h) { return h.getBoundingClientRect(); })
+            .filter(function (r) { return r.width > 40; })
+            .sort(function (a, b) { return a.x - b.x; });
+          if (rects.length >= 7) {
+            colW = rects[1].x - rects[0].x || colW;
+            startX = rects[0].x;
+            dayNums = heads.map(function (h) {
+              var l = lines(h);
+              for (var i = 0; i < l.length; i++) { if (/^[0-9]{1,2}$/.test(l[i])) return parseInt(l[i], 10); }
+              return -1;
+            });
+            var idx = dayNums.indexOf(new Date().getDate());
+            if (idx >= 0) todayCol = idx;
+          }
+        }
+        for (var i = 0; i < nodes.length && out.length < 200; i++) {
+          var n = nodes[i], r = n.getBoundingClientRect();
+          if (r.width < 20 || r.height < 14) continue;
+          var ls = lines(n);
+          if (!ls.length || ls[0].length > 160) continue;
+          var title = ls[0];
+          if (title === '(No title)') continue;
+          var meta = ls.slice(1).join(' ');
+          var full = ls.join(' ');
+          if (ls.length === 1) {
+            var clean = title.replace(/[, ]*[0-9]{1,2}:[0-9]{2}.*$/, '').trim();
+            if (clean) title = clean;
+          }
+          var startAttr = Number(n.getAttribute('data-start-time') || 0);
+          var start = -1, dayOffset = -999;
+          if (startAttr > 0) {
+            var d = new Date(startAttr * 1000);
+            var now = new Date();
+            var base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            dayOffset = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - base) / 86400000);
+            start = d.getHours() * 60 + d.getMinutes();
+          } else {
+            // Offscreen duplicate templates lack a start time; skip them rather
+            // than guessing a day from layout.
+            continue;
+          }
+          if (start < 0) continue;
+          var end = -1;
+          var range = full.match(/([0-9]{1,2}):([0-9]{2})[^0-9]{0,4}([0-9]{1,2}):([0-9]{2})/);
+          if (range) end = parseInt(range[3], 10) * 60 + parseInt(range[4], 10);
+          if (end <= start) end = start + 60;
+          var loc = meta
+            .replace(/([0-9]{1,2}):([0-9]{2})[^0-9]{0,4}([0-9]{1,2}):([0-9]{2})/, '')
+            .replace(/[0-9]{1,2}:[0-9]{2}/, '')
+            .replace(/^[ ,]+/, '')
+            .replace(/[ ]*[(][0-9]+[)]$/, '')
+            .trim();
+          var key = title + '|' + dayOffset + '|' + start;
+          if (seen[key]) continue;
+          seen[key] = 1;
+          out.push({ title: title, dayOffset: dayOffset, startMin: start, endMin: end, location: loc, attendees: [], colorKey: 'accent' });
+        }
+        return out;
+      }
+
+      function scrapeDocs() {
+        var raw = window.__swiftyDocsRaw;
+        if (!raw) return [];
+        var j;
+        try { j = JSON.parse(raw); } catch (e) { return []; }
+        var d = (j && j.data) || {};
+        var ents = d.entities || {};
+        var nodes = ents.nodes || {};
+        var users = ents.users || {};
+        var out = [];
+        for (var k in nodes) {
+          if (!Object.prototype.hasOwnProperty.call(nodes, k)) continue;
+          var v = nodes[k];
+          if (!v || !v.name) continue;
+          var t = Number(v.type || 0);
+          var extra = v.extra || {};
+          var kind = 'Doc';
+          if (t === 16) kind = 'Wiki';
+          else if (t === 8) kind = 'Sheet';
+          else if (t === 30) kind = 'Slide';
+          var owner = (users[v.owner_id] && users[v.owner_id].name) || '';
+          var folder = extra.wiki_space_name || extra.parent_folder_name || '';
+          out.push({
+            id: String(v.obj_token || k), title: String(v.name), kind: kind, owner: owner,
+            updated: Number(v.edit_time || v.open_time || 0), snippet: folder, shared: !!extra.is_external
+          });
+          if (out.length >= 60) break;
+        }
+        return out;
+      }
+
+      var path = location.pathname;
+      if (path.indexOf('/contacts') >= 0) return scrapeContacts();
+      var kind = '', items = [];
+      if (path.indexOf('/task') >= 0) { kind = 'tasks'; items = scrapeTasks(); }
+      else if (path.indexOf('/drive') >= 0) { kind = 'docs'; items = scrapeDocs(); }
+      else if (path.indexOf('/calendar') >= 0) { kind = 'events'; items = scrapeEvents(); }
+      return JSON.stringify({ kind: kind, url: location.href, items: items });
+    })()
+    """#
+}
+
 /// Invisible WKWebView that holds the Feishu web session and runs the scraper.
 struct FeishuSyncView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
@@ -1260,6 +1935,17 @@ struct FeishuSyncView: NSViewRepresentable {
         let webView = FeishuWebHost.webView
         if webView.superview != nil { webView.removeFromSuperview() }
         return webView
+    }
+
+    func updateNSView(_ nsView: WKWebView, context: Context) {}
+}
+
+/// Host view for the module walker's web view. Kept hidden next to the messenger
+/// scraper so Contacts/Tasks/Calendar/Docs render offscreen without a window of
+/// their own.
+struct FeishuModulesView: NSViewRepresentable {
+    func makeNSView(context: Context) -> WKWebView {
+        FeishuModules.shared.attachableView()
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {}

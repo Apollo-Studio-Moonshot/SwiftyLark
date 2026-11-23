@@ -429,6 +429,13 @@ final class AppModel: ObservableObject {
         // No default workspace: nothing is read from the core until the user
         // has signed in, so the app opens on the sign-in screen instead.
         if signedIn { load() }
+        // Signed-in launch: refresh the module data shortly after the window
+        // and the shared web view are alive.
+        if signedIn {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                FeishuModules.shared.refresh()
+            }
+        }
         // On launch (and after a Feishu session expires) open the login page
         // right away, so signing in is the first thing the app does.
         if !signedIn && !args.contains(where: { $0.hasPrefix("--screenshot") }) && !args.contains("--selftest") {
@@ -454,6 +461,21 @@ final class AppModel: ObservableObject {
             Task { @MainActor in
                 guard let self, !self.signedIn else { return }
                 self.completeSignIn()
+            }
+        }
+        // The module walker finished Contacts/Tasks/Calendar/Docs.
+        NotificationCenter.default.addObserver(forName: FeishuModules.didImport, object: nil, queue: .main) { [weak self] note in
+            guard let payload = note.userInfo?["payload"] as? [String: Any] else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = CoreClient.shared.importWorkspace(payload)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if let result {
+                        self.syncChats = result["chats"] as? Int ?? self.syncChats
+                        self.syncMessages = result["messages"] as? Int ?? self.syncMessages
+                    }
+                    self.load()
+                }
             }
         }
         // keep the list times fresh and pick up core-side changes
@@ -523,6 +545,43 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(true, forKey: AppModel.signedInKey)
         signedIn = true
         load()
+        // Chats arrive from the visible messenger; the other modules each load
+        // in their own web app, so wake the walker once the session is in.
+        FeishuModules.shared.refresh()
+    }
+
+    /// Re-import chats plus every module (Contacts, Tasks, Calendar, Docs).
+    func refreshAll() {
+        guard signedIn else {
+            loginRequested = true
+            return
+        }
+        FeishuWebHost.reload()
+        FeishuModules.shared.refresh()
+        load()
+    }
+
+    /// Forget the Feishu session and go back to the sign-in screen.
+    func signOut() {
+        UserDefaults.standard.set(false, forKey: AppModel.signedInKey)
+        signedIn = false
+        imported = false
+        chats = []
+        contacts = []
+        docs = []
+        events = []
+        tasks = []
+        syncStatus = ""
+        syncChats = 0
+        syncMessages = 0
+        FeishuSession.clear()
+        // Clearing web data also drops the other modules' cached micro-apps.
+        FeishuSession.resetWebData {
+            DispatchQueue.main.async {
+                FeishuWebHost.beginLogin()
+            }
+        }
+        loginRequested = true
     }
 
     /// The persisted Feishu session was rejected (the web client redirected to
@@ -539,8 +598,15 @@ final class AppModel: ObservableObject {
         imported = false
         chats = []
         syncStatus = ""
-        FeishuSession.clear()
-        FeishuWebHost.beginLogin()
+        // The tenant URL is kept: it is only used once a session is complete,
+        // and reusing the exact workspace avoids the generic www.feishu.cn
+        // messenger entry, which detours through SSO before showing a login.
+        // The tenant usually bounces straight to Feishu's login form. Only load
+        // it again when the web view is somewhere else, so a form the user is
+        // already looking at is not torn down and replayed through SSO.
+        if !FeishuSignIn.isLoginPage(FeishuWebHost.webView.url) {
+            FeishuWebHost.beginLogin()
+        }
         loginRequested = true
     }
 

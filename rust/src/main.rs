@@ -899,11 +899,13 @@ fn chat_json(c: &Chat) -> Value {
             json!(c
                 .messages
                 .last()
-                .map(|m| if !m.system && !m.sender.is_empty() && c.kind != "direct" {
-                    format!("{}: {}", m.sender, m.text)
-                } else {
-                    m.text.clone()
-                })
+                .map(
+                    |m| if !m.system && !m.sender.is_empty() && c.kind != "direct" {
+                        format!("{}: {}", m.sender, m.text)
+                    } else {
+                        m.text.clone()
+                    }
+                )
                 .unwrap_or_default()),
         );
     }
@@ -1089,12 +1091,23 @@ fn split_preview(text: &str) -> (String, String) {
             if pos > 0 && pos < 60 {
                 let sender = text[..pos].trim();
                 if !sender.is_empty() {
-                    return (sender.to_string(), text[pos + sep.len()..].trim().to_string());
+                    return (
+                        sender.to_string(),
+                        text[pos + sep.len()..].trim().to_string(),
+                    );
                 }
             }
         }
     }
     (String::new(), text.trim().to_string())
+}
+
+fn sfield(v: &Value, key: &str) -> String {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 /// Replaces the workspace with data scraped from the signed-in Feishu web
@@ -1217,11 +1230,7 @@ fn do_import(s: &mut Store, p: &Value) -> Result<Value, String> {
                     .unwrap_or("group")
                     .to_string(),
                 members,
-                unread: c
-                    .get("unread")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0)
-                    .max(0) as i32,
+                unread: c.get("unread").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as i32,
                 muted: c.get("muted").and_then(|v| v.as_bool()).unwrap_or(false),
                 pinned: c.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false),
                 typing: false,
@@ -1235,12 +1244,152 @@ fn do_import(s: &mut Store, p: &Value) -> Result<Value, String> {
             s.imported = true;
         }
     }
+    if let Some(list) = p.get("contacts").and_then(|v| v.as_array()) {
+        let mut out: Vec<Contact> = Vec::new();
+        for c in list {
+            let name = sfield(c, "name");
+            if name.is_empty() {
+                continue;
+            }
+            let email = sfield(c, "email");
+            let hash = stable_hash(&format!("{}{}", name, email));
+            out.push(Contact {
+                id: format!("ct-{:x}", hash),
+                avatar_text: initials(&name),
+                hue: (hash % 360) as i32,
+                name,
+                title: sfield(c, "title"),
+                dept: sfield(c, "dept"),
+                status: sfield(c, "status"),
+                email,
+                phone: sfield(c, "phone"),
+                timezone: sfield(c, "timezone"),
+                bio: sfield(c, "bio"),
+            });
+        }
+        if !out.is_empty() {
+            s.contacts = out;
+            s.imported = true;
+        }
+    }
+    if let Some(list) = p.get("docs").and_then(|v| v.as_array()) {
+        let mut out: Vec<Doc> = Vec::new();
+        for d in list {
+            let title = sfield(d, "title");
+            if title.is_empty() {
+                continue;
+            }
+            let hash = stable_hash(&format!("{}{}", title, sfield(d, "id")));
+            let kind = {
+                let k = sfield(d, "kind");
+                if k.is_empty() {
+                    "Doc".to_string()
+                } else {
+                    k
+                }
+            };
+            out.push(Doc {
+                id: format!("d-{:x}", hash),
+                title,
+                kind,
+                owner: sfield(d, "owner"),
+                updated: d
+                    .get("updated")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or_else(now_secs),
+                snippet: sfield(d, "snippet"),
+                shared: d.get("shared").and_then(|v| v.as_bool()).unwrap_or(false),
+            });
+        }
+        if !out.is_empty() {
+            s.docs = out;
+            s.imported = true;
+        }
+    }
+    if let Some(list) = p.get("events").and_then(|v| v.as_array()) {
+        let mut out: Vec<Event> = Vec::new();
+        for e in list {
+            let title = sfield(e, "title");
+            if title.is_empty() {
+                continue;
+            }
+            let hash = stable_hash(&format!(
+                "{}{}{}",
+                title,
+                e.get("dayOffset").and_then(|v| v.as_i64()).unwrap_or(0),
+                e.get("startMin").and_then(|v| v.as_i64()).unwrap_or(0)
+            ));
+            let attendees: Vec<String> = e
+                .get("attendees")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.push(Event {
+                id: format!("e-{:x}", hash),
+                title,
+                day_offset: e.get("dayOffset").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                start_min: e.get("startMin").and_then(|v| v.as_i64()).unwrap_or(540) as i32,
+                end_min: e.get("endMin").and_then(|v| v.as_i64()).unwrap_or(600) as i32,
+                location: sfield(e, "location"),
+                attendees,
+                color_key: {
+                    let k = sfield(e, "colorKey");
+                    if k.is_empty() {
+                        "accent".to_string()
+                    } else {
+                        k
+                    }
+                },
+            });
+        }
+        if !out.is_empty() {
+            s.events = out;
+            s.imported = true;
+        }
+    }
+    if let Some(list) = p.get("tasks").and_then(|v| v.as_array()) {
+        let mut out: Vec<Task> = Vec::new();
+        for t in list {
+            let title = sfield(t, "title");
+            if title.is_empty() {
+                continue;
+            }
+            let hash = stable_hash(&title);
+            out.push(Task {
+                id: format!("t-{:x}", hash),
+                title,
+                done: t.get("done").and_then(|v| v.as_bool()).unwrap_or(false),
+                due: sfield(t, "due"),
+                list: {
+                    let l = sfield(t, "list");
+                    if l.is_empty() {
+                        "Tasks".to_string()
+                    } else {
+                        l
+                    }
+                },
+                assignee: sfield(t, "assignee"),
+            });
+        }
+        if !out.is_empty() {
+            s.tasks = out;
+            s.imported = true;
+        }
+    }
     save(s);
     let messages: usize = s.chats.iter().map(|c| c.messages.len()).sum();
     Ok(json!({
         "imported": s.imported,
         "chats": s.chats.len(),
         "messages": messages,
+        "contacts": s.contacts.len(),
+        "docs": s.docs.len(),
+        "events": s.events.len(),
+        "tasks": s.tasks.len(),
         "workspace": s.workspace.name,
         "user": s.user.name,
     }))

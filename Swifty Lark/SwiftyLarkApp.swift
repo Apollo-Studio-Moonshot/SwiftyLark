@@ -14,33 +14,6 @@ struct SwiftyLarkApp: App {
                 .background(WindowAccessor { window in
                     delegate.register(window: window)
                 })
-                .overlay {
-                    // Invisible shortcut holders so ⌘K and ⌘, work anywhere.
-                    ZStack {
-                        Button("Search") { model.searchOpen = true }
-                            .keyboardShortcut("k", modifiers: .command)
-                        // Lark's openSecondQuickSearch default is Command+F; both open search.
-                        Button("Search again") { model.searchOpen = true }
-                            .keyboardShortcut("f", modifiers: .command)
-                        Button("Settings") { model.showSettings = true }
-                            .keyboardShortcut(",", modifiers: .command)
-                        Button("Close search") { model.searchOpen = false }
-                            .keyboardShortcut(.escape, modifiers: [])
-                        Button("Messages") { model.tab = .messages }
-                            .keyboardShortcut("1", modifiers: .command)
-                        Button("Calendar") { model.tab = .calendar }
-                            .keyboardShortcut("2", modifiers: .command)
-                        Button("Docs") { model.tab = .docs }
-                            .keyboardShortcut("3", modifiers: .command)
-                        Button("Contacts") { model.tab = .contacts }
-                            .keyboardShortcut("4", modifiers: .command)
-                        Button("Tasks") { model.tab = .tasks }
-                            .keyboardShortcut("5", modifiers: .command)
-                    }
-                    .frame(width: 0, height: 0)
-                    .opacity(0)
-                    .allowsHitTesting(false)
-                }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(
@@ -49,7 +22,99 @@ struct SwiftyLarkApp: App {
         )
         .commands {
             CommandGroup(replacing: .newItem) {}
-            CommandGroup(replacing: .appInfo) {}
+            CommandGroup(replacing: .appInfo) {
+                Button("About Swifty Lark") { AboutPanel.show() }
+            }
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { model.showSettings = true }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
+            CommandMenu("Feishu") {
+                Button("Refresh Workspace") { model.refreshAll() }
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                Button("Open Messenger in Browser") {
+                    NSWorkspace.shared.open(FeishuSignIn.messengerURL)
+                }
+                Divider()
+                Button("Sign Out") { model.signOut() }
+                    .keyboardShortcut("q", modifiers: [.command, .shift])
+            }
+            CommandMenu("View") {
+                Button("Messages") { model.tab = .messages }
+                    .keyboardShortcut("1", modifiers: .command)
+                Button("Calendar") { model.tab = .calendar }
+                    .keyboardShortcut("2", modifiers: .command)
+                Button("Docs") { model.tab = .docs }
+                    .keyboardShortcut("3", modifiers: .command)
+                Button("Contacts") { model.tab = .contacts }
+                    .keyboardShortcut("4", modifiers: .command)
+                Button("Tasks") { model.tab = .tasks }
+                    .keyboardShortcut("5", modifiers: .command)
+                Divider()
+                // Both match Lark's openQuickSearch / openSecondQuickSearch defaults.
+                Button("Search") { model.searchOpen = true }
+                    .keyboardShortcut("k", modifiers: .command)
+                Button("Find Again") { model.searchOpen = true }
+                    .keyboardShortcut("f", modifiers: .command)
+                Button("Close Search") { model.searchOpen = false }
+                    .keyboardShortcut(.escape, modifiers: [])
+                    .disabled(!model.searchOpen)
+            }
+            CommandGroup(replacing: .help) {
+                Button("Swifty Lark Help") { AppHelp.show() }
+                Button("Feishu Help") {
+                    NSWorkspace.shared.open(URL(string: "https://www.feishu.cn/hc/en-US")!)
+                }
+            }
+        }
+    }
+}
+
+/// The standard AppKit about panel, so About matches every other Mac app.
+enum AboutPanel {
+    static func show() {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "3.0"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "4"
+        let credits = NSMutableAttributedString(
+            string: "A native SwiftUI client for Feishu / Lark, backed by a Rust core.\nNo Electron and no Chromium helper processes.\n\nSign in with Feishu to import your chats, contacts, tasks, calendar and documents."
+        )
+        credits.addAttribute(
+            .font,
+            value: NSFont.systemFont(ofSize: 11),
+            range: NSRange(location: 0, length: credits.length)
+        )
+        var options: [NSApplication.AboutPanelOptionKey: Any] = [
+            .applicationName: "Swifty Lark",
+            .applicationVersion: version,
+            .version: build,
+            .credits: credits
+        ]
+        if let icon = NSApp.applicationIconImage {
+            options[.applicationIcon] = icon
+        }
+        NSApp.orderFrontStandardAboutPanel(options: options)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+enum AppHelp {
+    static func show() {
+        let alert = NSAlert()
+        alert.messageText = "Swifty Lark"
+        alert.informativeText = """
+        Sign in with your Feishu account to load your real workspace. The embedded \
+        Feishu web client supplies chats and messages, and the Contacts, Tasks, \
+        Calendar and Docs modules are imported from their own web apps.
+
+        Refresh Workspace (⇧⌘R) imports everything again. Sign Out (⇧⌘Q) clears \
+        the saved session and web data so you can switch accounts.
+
+        Swifty Lark never sees your password: sign-in happens on accounts.feishu.cn.
+        """
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Open Feishu Help")
+        if alert.runModal() == .alertSecondButtonReturn {
+            NSWorkspace.shared.open(URL(string: "https://www.feishu.cn/hc/en-US")!)
         }
     }
 }
@@ -229,4 +294,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    /// Clicking the Dock icon after closing the window brings it back, as on
+    /// any other Mac app.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            sender.windows.first { !$0.isSheet }?.makeKeyAndOrderFront(nil)
+        }
+        return true
+    }
+
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 }

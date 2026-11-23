@@ -88,7 +88,16 @@ page inside the app (a `WKWebView`, the same pattern MeloX uses); once Feishu
 moves the web view to your tenant messenger, the session is kept and the app
 opens your real Feishu workspace in an embedded web view.
 
-After sign-in the window shows the real Feishu web client, so the native sample
-screens from the clone are no longer used. Not in this version: a native Feishu
-data layer, network sync, meetings, mail, wiki, moments and the AI assistant.
+After sign-in the app imports the whole workspace, not just the messenger: the
+messages come from the tenant's web client, while Contacts, Tasks, Calendar and
+Docs are read from their own Feishu web apps in a second hidden web view. The
+`Feishu` menu's **Refresh Workspace** (⇧⌘R) imports everything again and **Sign
+Out** (⇧⌘Q) clears the saved session. The app also carries the standard macOS
+App/View/Help menus, a native About panel, Settings (⌘,) and tab shortcuts
+(⌘1–⌘5).
+
+After sign-in the native workspace is filled from Feishu: chats and messages
+from the messenger, plus contacts, tasks, calendar events and documents from
+their own web apps. Not in this version: meetings, mail, wiki editing, moments
+and the AI assistant.
 See `MECHANICS.md`.
