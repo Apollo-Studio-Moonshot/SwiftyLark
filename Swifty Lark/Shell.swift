@@ -40,6 +40,30 @@ struct RootView: View {
 
     var body: some View {
         let p = Palette(dark: isDark)
+        Group {
+            if model.signedIn {
+                workspace(p)
+            } else {
+                SignInView()
+            }
+        }
+        .background(p.content)
+        .environment(\.palette, p)
+        .preferredColorScheme(model.prefs.theme == "system" ? nil : (isDark ? .dark : .light))
+        .background(WindowAccessor { window in
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            window.isMovableByWindowBackground = false
+            window.backgroundColor = NSColor(p.content)
+        })
+        // Lark's notifySetting.showUnreadNumber defaults to true; badgeStyle WEAK_REMIND (1)
+        // means the dock badge only carries the unread count.
+        .onAppear { updateDockBadge(model.unreadTotal) }
+        .onChange(of: model.unreadTotal) { total in updateDockBadge(total) }
+        .onChange(of: model.signedIn) { _ in updateDockBadge(model.unreadTotal) }
+    }
+
+    private func workspace(_ p: Palette) -> some View {
         VStack(spacing: 0) {
             TitleBar()
             Rectangle().fill(p.borderSoft).frame(height: 1)
@@ -59,9 +83,6 @@ struct RootView: View {
                 }
             }
         }
-        .background(p.content)
-        .environment(\.palette, p)
-        .preferredColorScheme(model.prefs.theme == "system" ? nil : (isDark ? .dark : .light))
         .overlay {
             if model.searchOpen {
                 SearchOverlay()
@@ -72,20 +93,123 @@ struct RootView: View {
                 .environment(\.palette, p)
                 .environmentObject(model)
         }
-        .background(WindowAccessor { window in
-            window.titlebarAppearsTransparent = true
-            window.titleVisibility = .hidden
-            window.isMovableByWindowBackground = false
-            window.backgroundColor = NSColor(p.content)
-        })
-        // Lark's notifySetting.showUnreadNumber defaults to true; badgeStyle WEAK_REMIND (1)
-        // means the dock badge only carries the unread count.
-        .onAppear { updateDockBadge(model.unreadTotal) }
-        .onChange(of: model.unreadTotal) { total in updateDockBadge(total) }
     }
 
     private func updateDockBadge(_ total: Int) {
         NSApp.dockTile.badgeLabel = total > 0 ? "\(total)" : nil
+    }
+}
+
+// MARK: - Sign in
+
+/// Feishu's own web sign-in page. Authentication happens on Feishu's site in
+/// the default browser, so the app never handles the password itself.
+enum FeishuSignIn {
+    static let loginURL = URL(string: "https://accounts.feishu.cn/accounts/page/login")!
+
+    static func openInBrowser() {
+        NSWorkspace.shared.open(loginURL)
+    }
+}
+
+struct SignInView: View {
+    @Environment(\.palette) private var p
+    @State private var opened = false
+
+    var body: some View {
+        ZStack {
+            background
+            WindowDragArea()
+            VStack(spacing: 0) {
+                Spacer(minLength: 24)
+                card
+                Spacer(minLength: 24)
+            }
+            .padding(.horizontal, 40)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var card: some View {
+        VStack(spacing: 18) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(LinearGradient(
+                        colors: [Color(hex: "#5b93ff"), Color(hex: "#2f62d4")],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ))
+                    .frame(width: 66, height: 66)
+                    .shadow(color: Color(hex: "#2f62d4").opacity(0.35), radius: 14, y: 6)
+                Image(systemName: "bubble.left.and.bubble.right.fill")
+                    .font(.system(size: 29, weight: .medium))
+                    .foregroundColor(.white)
+            }
+
+            VStack(spacing: 6) {
+                Text("Sign in to Feishu")
+                    .font(.system(size: 19, weight: .bold))
+                    .foregroundColor(p.textPrimary)
+                Text("Swifty Lark opens Feishu's official sign-in page in your browser.")
+                    .font(.system(size: 12))
+                    .foregroundColor(p.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Button(action: open) {
+                HStack(spacing: 8) {
+                    Text(opened ? "Open Feishu again" : "Sign in with Feishu")
+                    Image(systemName: "arrow.up.right.square")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 40)
+                .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(p.accent))
+            }
+            .buttonStyle(.plain)
+            .help("Open accounts.feishu.cn in your default browser")
+
+            Text(opened
+                 ? "Feishu is open in your browser — finish signing in there."
+                 : "You'll sign in on accounts.feishu.cn. Swifty Lark never sees your password.")
+                .font(.system(size: 10.5))
+                .foregroundColor(p.textMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 34)
+        .padding(.vertical, 30)
+        .frame(width: 400)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(p.list)
+                .shadow(color: Color.black.opacity(p.dark ? 0.35 : 0.10), radius: 30, y: 12)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(p.borderSoft, lineWidth: 1)
+        )
+    }
+
+    private func open() {
+        FeishuSignIn.openInBrowser()
+        opened = true
+    }
+
+    private var background: some View {
+        ZStack {
+            p.dark ? Color(hex: "#0d0e10") : Color(hex: "#f5f7fa")
+            RadialGradient(
+                colors: [p.accent.opacity(p.dark ? 0.20 : 0.14), .clear],
+                center: .top,
+                startRadius: 10,
+                endRadius: 520
+            )
+        }
+        .ignoresSafeArea()
     }
 }
 

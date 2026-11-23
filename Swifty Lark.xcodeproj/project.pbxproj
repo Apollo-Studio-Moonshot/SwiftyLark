@@ -16,7 +16,7 @@
 		AA000000000000000000002E /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000001B /* Theme.swift */; };
 		AA000000000000000000002F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000001C /* Assets.xcassets */; };
 		AA0000000000000000000030 /* mechanics.json in Resources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000001E /* mechanics.json */; };
-		AA0000000000000000000031 /* swiftylark-core in Embed Core */ = {isa = PBXBuildFile; fileRef = AA000000000000000000001F /* swiftylark-core */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		AA0000000000000000000031 /* rust/target/release/swiftylark-core in Embed Core */ = {isa = PBXBuildFile; fileRef = AA000000000000000000001F /* rust/target/release/swiftylark-core */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -26,7 +26,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 7;
 			files = (
-				AA0000000000000000000031 /* swiftylark-core in Embed Core */,
+				AA0000000000000000000031 /* rust/target/release/swiftylark-core in Embed Core */,
 			);
 			name = "Embed Core";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -45,7 +45,7 @@
 		AA000000000000000000001C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AA000000000000000000001D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA000000000000000000001E /* mechanics.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = mechanics.json; sourceTree = "<group>"; };
-		AA000000000000000000001F /* swiftylark-core */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; path = "rust/target/release/swiftylark-core"; sourceTree = "<group>"; };
+		AA000000000000000000001F /* rust/target/release/swiftylark-core */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; path = "rust/target/release/swiftylark-core"; sourceTree = "<group>"; };
 		AA0000000000000000000020 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -65,7 +65,7 @@
 			children = (
 				AA0000000000000000000004 /* Swifty Lark */,
 				AA000000000000000000001E /* mechanics.json */,
-				AA000000000000000000001F /* swiftylark-core */,
+				AA000000000000000000001F /* rust/target/release/swiftylark-core */,
 				AA0000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -347,6 +347,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Swifty Lark/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Swifty Lark";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -372,6 +373,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Swifty Lark/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Swifty Lark";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",

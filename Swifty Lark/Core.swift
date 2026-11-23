@@ -379,6 +379,9 @@ final class AppModel: ObservableObject {
     @Published var showSettings = false
     @Published var loading = true
     @Published var toast: String?
+    /// Signing in happens on Feishu's own web page; until that returns a session
+    /// there is no workspace to show, so the demo data is never loaded.
+    @Published var signedIn = false
 
     enum ChatFilter: String, CaseIterable, Identifiable {
         case all = "All"
@@ -401,11 +404,15 @@ final class AppModel: ObservableObject {
             searchQuery = args[i + 1]
             runSearch(args[i + 1])
         }
-        load()
+        // No default workspace: nothing is read from the core until the user
+        // has signed in, so the app opens on the sign-in screen instead.
         // keep the list times fresh and pick up core-side changes
         let t = DispatchSource.makeTimerSource(queue: .main)
         t.schedule(deadline: .now() + 30, repeating: 30)
-        t.setEventHandler { [weak self] in self?.refreshQuietly() }
+        t.setEventHandler { [weak self] in
+            guard let self, self.signedIn else { return }
+            self.refreshQuietly()
+        }
         t.resume()
         refreshTimer = t
     }
